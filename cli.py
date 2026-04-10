@@ -120,6 +120,18 @@ def _parse_reasoning_config(effort: str) -> dict | None:
     return result
 
 
+def _parse_service_tier_config(raw: str) -> str | None:
+    """Parse a persisted service-tier preference into a Responses API value."""
+    value = str(raw or "").strip().lower()
+    if not value or value in {"normal", "default", "standard", "off", "none"}:
+        return None
+    if value in {"fast", "priority", "on"}:
+        return "priority"
+    logger.warning("Unknown service_tier '%s', ignoring", raw)
+    return None
+
+
+
 def _get_chrome_debug_candidates(system: str) -> list[str]:
     """Return likely browser executables for local CDP auto-launch."""
     candidates: list[str] = []
@@ -239,6 +251,7 @@ def load_cli_config() -> Dict[str, Any]:
             "system_prompt": "",
             "prefill_messages_file": "",
             "reasoning_effort": "",
+            "service_tier": "",
             "personalities": {
                 "helpful": "You are a helpful, friendly AI assistant.",
                 "concise": "You are a concise assistant. Keep responses brief and to the point.",
@@ -1634,6 +1647,9 @@ class HermesCLI:
         self.reasoning_config = _parse_reasoning_config(
             CLI_CONFIG["agent"].get("reasoning_effort", "")
         )
+        self.service_tier = _parse_service_tier_config(
+            CLI_CONFIG["agent"].get("service_tier", "")
+        )
         
         # OpenRouter provider routing preferences
         pr = CLI_CONFIG.get("provider_routing", {}) or {}
@@ -2292,17 +2308,59 @@ class HermesCLI:
         # Append to a pre-filter buffer first
         self._stream_prefilt = getattr(self, "_stream_prefilt", "") + text
 
-        # Check if we're entering a reasoning block
+        # Check if we're entering a reasoning block.
+        # Only match tags that appear at a "block boundary": start of the
+        # stream, after a newline (with optional whitespace), or when nothing
+        # but whitespace has been emitted on the current line.
+        # This prevents false positives when models *mention* tags in prose
+        # like "(/think not producing <think> tags)".
+        #
+        # _stream_last_was_newline tracks whether the last character emitted
+        # (or the start of the stream) is a line boundary.  It's True at
+        # stream start and set True whenever emitted text ends with '\n'.
+        if not hasattr(self, "_stream_last_was_newline"):
+            self._stream_last_was_newline = True  # start of stream = boundary
+
         if not getattr(self, "_in_reasoning_block", False):
             for tag in _OPEN_TAGS:
-                idx = self._stream_prefilt.find(tag)
-                if idx != -1:
-                    # Emit everything before the tag
-                    before = self._stream_prefilt[:idx]
-                    if before:
-                        self._emit_stream_text(before)
-                    self._in_reasoning_block = True
-                    self._stream_prefilt = self._stream_prefilt[idx + len(tag):]
+                search_start = 0
+                while True:
+                    idx = self._stream_prefilt.find(tag, search_start)
+                    if idx == -1:
+                        break
+                    # Check if this is a block boundary position
+                    preceding = self._stream_prefilt[:idx]
+                    if idx == 0:
+                        # At buffer start — only a boundary if we're at
+                        # a line start (stream start or last emit ended
+                        # with newline)
+                        is_block_boundary = getattr(self, "_stream_last_was_newline", True)
+                    else:
+                        # Find last newline in the buffer before the tag
+                        last_nl = preceding.rfind("\n")
+                        if last_nl == -1:
+                            # No newline in buffer — boundary only if
+                            # last emit was a newline AND only whitespace
+                            # has accumulated before the tag
+                            is_block_boundary = (
+                                getattr(self, "_stream_last_was_newline", True)
+                                and preceding.strip() == ""
+                            )
+                        else:
+                            # Text between last newline and tag must be
+                            # whitespace-only
+                            is_block_boundary = preceding[last_nl + 1:].strip() == ""
+                    if is_block_boundary:
+                        # Emit everything before the tag
+                        if preceding:
+                            self._emit_stream_text(preceding)
+                            self._stream_last_was_newline = preceding.endswith("\n")
+                        self._in_reasoning_block = True
+                        self._stream_prefilt = self._stream_prefilt[idx + len(tag):]
+                        break
+                    # Not a block boundary — keep searching after this occurrence
+                    search_start = idx + 1
+                if getattr(self, "_in_reasoning_block", False):
                     break
 
             # Could also be a partial open tag at the end — hold it back
@@ -2316,6 +2374,7 @@ class HermesCLI:
                             break
                 if safe:
                     self._emit_stream_text(safe)
+                    self._stream_last_was_newline = safe.endswith("\n")
                     self._stream_prefilt = self._stream_prefilt[len(safe):]
                 return
 
@@ -2405,6 +2464,14 @@ class HermesCLI:
 
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
+        # If we're still inside a "reasoning block" at end-of-stream, it was
+        # a false positive — the model mentioned a tag like <think> in prose
+        # but never closed it.  Recover the buffered content as regular text.
+        if getattr(self, "_in_reasoning_block", False) and getattr(self, "_stream_prefilt", ""):
+            self._in_reasoning_block = False
+            self._emit_stream_text(self._stream_prefilt)
+            self._stream_prefilt = ""
+
         # Close reasoning box if still open (in case no content tokens arrived)
         self._close_reasoning_box()
 
@@ -2427,6 +2494,7 @@ class HermesCLI:
         self._stream_text_ansi = ""
         self._stream_prefilt = ""
         self._in_reasoning_block = False
+        self._stream_last_was_newline = True
         self._reasoning_box_opened = False
         self._reasoning_buf = ""
         self._reasoning_preview_buf = ""
@@ -2556,8 +2624,9 @@ class HermesCLI:
     def _resolve_turn_agent_config(self, user_message: str) -> dict:
         """Resolve model/runtime overrides for a single user turn."""
         from agent.smart_model_routing import resolve_turn_route
+        from hermes_cli.models import resolve_fast_mode_overrides
 
-        return resolve_turn_route(
+        route = resolve_turn_route(
             user_message,
             self._smart_model_routing,
             {
@@ -2572,7 +2641,19 @@ class HermesCLI:
             },
         )
 
-    def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, route_label: str = None) -> bool:
+        service_tier = getattr(self, "service_tier", None)
+        if not service_tier:
+            route["request_overrides"] = None
+            return route
+
+        try:
+            overrides = resolve_fast_mode_overrides(route.get("model"))
+        except Exception:
+            overrides = None
+        route["request_overrides"] = overrides
+        return route
+
+    def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, route_label: str = None, request_overrides: dict | None = None) -> bool:
         """
         Initialize the agent on first use.
         When resuming a session, restores conversation history from SQLite.
@@ -2659,6 +2740,8 @@ class HermesCLI:
                 ephemeral_system_prompt=self.system_prompt if self.system_prompt else None,
                 prefill_messages=self.prefill_messages or None,
                 reasoning_config=self.reasoning_config,
+                service_tier=self.service_tier,
+                request_overrides=request_overrides,
                 providers_allowed=self._providers_only,
                 providers_ignored=self._providers_ignore,
                 providers_order=self._providers_order,
@@ -3316,6 +3399,20 @@ class HermesCLI:
             f"{toolsets_info}{provider_info}"
         )
     
+    def _fast_command_available(self) -> bool:
+        try:
+            from hermes_cli.models import model_supports_fast_mode
+        except Exception:
+            return False
+        agent = getattr(self, "agent", None)
+        model = getattr(agent, "model", None) or getattr(self, "model", None)
+        return model_supports_fast_mode(model)
+
+    def _command_available(self, slash_command: str) -> bool:
+        if slash_command == "/fast":
+            return self._fast_command_available()
+        return True
+
     def show_help(self):
         """Display help information with categorized commands."""
         from hermes_cli.commands import COMMANDS_BY_CATEGORY
@@ -3336,6 +3433,8 @@ class HermesCLI:
         for category, commands in COMMANDS_BY_CATEGORY.items():
             _cprint(f"\n  {_BOLD}── {category} ──{_RST}")
             for cmd, desc in commands.items():
+                if not self._command_available(cmd):
+                    continue
                 ChatConsole().print(f"    [bold {_accent_hex()}]{cmd:<15}[/] [dim]-[/] {_escape(desc)}")
 
         if _skill_commands:
@@ -4788,6 +4887,8 @@ class HermesCLI:
             self._toggle_yolo()
         elif canonical == "reasoning":
             self._handle_reasoning_command(cmd_original)
+        elif canonical == "fast":
+            self._handle_fast_command(cmd_original)
         elif canonical == "compress":
             self._manual_compress()
         elif canonical == "usage":
@@ -5027,6 +5128,8 @@ class HermesCLI:
                     platform="cli",
                     session_db=self._session_db,
                     reasoning_config=self.reasoning_config,
+                    service_tier=self.service_tier,
+                    request_overrides=turn_route.get("request_overrides"),
                     providers_allowed=self._providers_only,
                     providers_ignored=self._providers_ignore,
                     providers_order=self._providers_order,
@@ -5162,6 +5265,8 @@ class HermesCLI:
                     session_id=task_id,
                     platform="cli",
                     reasoning_config=self.reasoning_config,
+                    service_tier=self.service_tier,
+                    request_overrides=turn_route.get("request_overrides"),
                     providers_allowed=self._providers_only,
                     providers_ignored=self._providers_ignore,
                     providers_order=self._providers_order,
@@ -5590,6 +5695,40 @@ class HermesCLI:
             _cprint(f"  {_GOLD}✓ Reasoning effort set to '{arg}' (saved to config){_RST}")
         else:
             _cprint(f"  {_GOLD}✓ Reasoning effort set to '{arg}' (session only){_RST}")
+
+    def _handle_fast_command(self, cmd: str):
+        """Handle /fast — toggle OpenAI Priority Processing (service_tier)."""
+        if not self._fast_command_available():
+            _cprint("  (._.) /fast is only available for OpenAI models that support Priority Processing.")
+            return
+
+        parts = cmd.strip().split(maxsplit=1)
+        if len(parts) < 2 or parts[1].strip().lower() == "status":
+            status = "fast" if self.service_tier == "priority" else "normal"
+            _cprint(f"  {_GOLD}Priority Processing: {status}{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
+            return
+
+        arg = parts[1].strip().lower()
+
+        if arg in {"fast", "on"}:
+            self.service_tier = "priority"
+            saved_value = "fast"
+            label = "FAST"
+        elif arg in {"normal", "off"}:
+            self.service_tier = None
+            saved_value = "normal"
+            label = "NORMAL"
+        else:
+            _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
+            _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
+            return
+
+        self.agent = None  # Force agent re-init with new service-tier config
+        if save_config_value("agent.service_tier", saved_value):
+            _cprint(f"  {_GOLD}✓ Priority Processing set to {label} (saved to config){_RST}")
+        else:
+            _cprint(f"  {_GOLD}✓ Priority Processing set to {label} (session only){_RST}")
 
     def _on_reasoning(self, reasoning_text: str):
         """Callback for intermediate reasoning display during tool-call loops."""
@@ -6749,6 +6888,7 @@ class HermesCLI:
             model_override=turn_route["model"],
             runtime_override=turn_route["runtime"],
             route_label=turn_route["label"],
+            request_overrides=turn_route.get("request_overrides"),
         ):
             return None
         
@@ -7931,6 +8071,7 @@ class HermesCLI:
 
         _completer = SlashCommandCompleter(
             skill_commands_provider=lambda: _skill_commands,
+            command_filter=cli_ref._command_available,
         )
         input_area = TextArea(
             height=Dimension(min=1, max=8, preferred=1),
@@ -9009,6 +9150,7 @@ def main(
                     model_override=turn_route["model"],
                     runtime_override=turn_route["runtime"],
                     route_label=turn_route["label"],
+                    request_overrides=turn_route.get("request_overrides"),
                 ):
                     cli.agent.quiet_mode = True
                     cli.agent.suppress_status_output = True
