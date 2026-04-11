@@ -18,6 +18,7 @@ Environment variables:
     MATRIX_REQUIRE_MENTION      Require @mention in rooms (default: true)
     MATRIX_FREE_RESPONSE_ROOMS  Comma-separated room IDs exempt from mention requirement
     MATRIX_AUTO_THREAD          Auto-create threads for room messages (default: true)
+    MATRIX_DM_MENTION_THREADS   Create a thread when bot is @mentioned in a DM (default: false)
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
+    ProcessingOutcome,
     SendResult,
 )
 
@@ -176,6 +178,9 @@ class MatrixAdapter(BasePlatformAdapter):
         self._reactions_enabled: bool = os.getenv(
             "MATRIX_REACTIONS", "true"
         ).lower() not in ("false", "0", "no")
+        # Tracks the reaction event_id for in-progress (eyes) reactions.
+        # Key: (room_id, message_event_id) → reaction_event_id (for the eyes reaction).
+        self._pending_reactions: dict[tuple[str, str], str] = {}
 
         # Text batching: merge rapid successive messages (Telegram-style).
         # Matrix clients split long messages around 4000 chars.
@@ -1039,6 +1044,13 @@ class MatrixAdapter(BasePlatformAdapter):
                 if not self._is_bot_mentioned(body, formatted_body):
                     return
 
+        # DM mention-thread: when enabled, @mentioning bot in a DM creates a thread.
+        if is_dm and not thread_id:
+            dm_mention_threads = os.getenv("MATRIX_DM_MENTION_THREADS", "false").lower() in ("true", "1", "yes")
+            if dm_mention_threads and self._is_bot_mentioned(body, source_content.get("formatted_body")):
+                thread_id = event.event_id
+                self._track_thread(thread_id)
+
         # Strip mention from body when present (including in DMs).
         if self._is_bot_mentioned(body, source_content.get("formatted_body")):
             body = self._strip_mention(body)
@@ -1356,6 +1368,13 @@ class MatrixAdapter(BasePlatformAdapter):
                 if not self._is_bot_mentioned(body, formatted_body):
                     return
 
+        # DM mention-thread: when enabled, @mentioning bot in a DM creates a thread.
+        if is_dm and not thread_id:
+            dm_mention_threads = os.getenv("MATRIX_DM_MENTION_THREADS", "false").lower() in ("true", "1", "yes")
+            if dm_mention_threads and self._is_bot_mentioned(body, source_content.get("formatted_body")):
+                thread_id = event.event_id
+                self._track_thread(thread_id)
+
         # Strip mention from body when present (including in DMs).
         if self._is_bot_mentioned(body, source_content.get("formatted_body")):
             body = self._strip_mention(body)
@@ -1436,12 +1455,14 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _send_reaction(
         self, room_id: str, event_id: str, emoji: str,
-    ) -> bool:
-        """Send an emoji reaction to a message in a room."""
+    ) -> Optional[str]:
+        """Send an emoji reaction to a message in a room.
+        Returns the reaction event_id on success, None on failure.
+        """
         import nio
 
         if not self._client:
-            return False
+            return None
         content = {
             "m.relates_to": {
                 "rel_type": "m.annotation",
@@ -1456,12 +1477,12 @@ class MatrixAdapter(BasePlatformAdapter):
             )
             if isinstance(resp, nio.RoomSendResponse):
                 logger.debug("Matrix: sent reaction %s to %s", emoji, event_id)
-                return True
+                return resp.event_id
             logger.debug("Matrix: reaction send failed: %s", resp)
-            return False
+            return None
         except Exception as exc:
             logger.debug("Matrix: reaction send error: %s", exc)
-            return False
+            return None
 
     async def _redact_reaction(
         self, room_id: str, reaction_event_id: str, reason: str = "",
@@ -1476,10 +1497,12 @@ class MatrixAdapter(BasePlatformAdapter):
         msg_id = event.message_id
         room_id = event.source.chat_id
         if msg_id and room_id:
-            await self._send_reaction(room_id, msg_id, "\U0001f440")
+            reaction_event_id = await self._send_reaction(room_id, msg_id, "\U0001f440")
+            if reaction_event_id:
+                self._pending_reactions[(room_id, msg_id)] = reaction_event_id
 
     async def on_processing_complete(
-        self, event: MessageEvent, success: bool,
+        self, event: MessageEvent, outcome: ProcessingOutcome,
     ) -> None:
         """Replace eyes with checkmark (success) or cross (failure)."""
         if not self._reactions_enabled:
@@ -1488,11 +1511,18 @@ class MatrixAdapter(BasePlatformAdapter):
         room_id = event.source.chat_id
         if not msg_id or not room_id:
             return
-        # Note: Matrix doesn't support removing a specific reaction easily
-        # without tracking the reaction event_id. We send the new reaction;
-        # the eyes stays (acceptable UX — both are visible).
+        if outcome == ProcessingOutcome.CANCELLED:
+            return
+        # Remove the eyes reaction first, if we tracked its event_id.
+        reaction_key = (room_id, msg_id)
+        if reaction_key in self._pending_reactions:
+            eyes_event_id = self._pending_reactions.pop(reaction_key)
+            if not await self._redact_reaction(room_id, eyes_event_id):
+                logger.debug("Matrix: failed to redact eyes reaction %s", eyes_event_id)
         await self._send_reaction(
-            room_id, msg_id, "\u2705" if success else "\u274c",
+            room_id,
+            msg_id,
+            "\u2705" if outcome == ProcessingOutcome.SUCCESS else "\u274c",
         )
 
     async def _on_reaction(self, room: Any, event: Any) -> None:
