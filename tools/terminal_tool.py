@@ -1625,6 +1625,50 @@ def _resolve_notification_flag_conflict(
     return watch_patterns, ""
 
 
+def _preprocess_command_for_adaptive_timeout(command: str) -> str:
+    """
+    Preprocess commands to enable adaptive timeout detection.
+
+    For commands that don't produce output during long-running operations
+    (like git clone), add flags that generate progress output. This allows
+    the idle timeout mechanism to detect activity and avoid premature timeout.
+
+    Args:
+        command: The original command string
+
+    Returns:
+        str: The preprocessed command with progress flags added if needed
+    """
+    # Pattern for git clone (including gh repo fork --clone)
+    git_clone_pattern = re.compile(
+        r'\b(?:git\s+clone|(?:gh\s+repo\s+fork\s+.*?--clone|gh\s+repo\s+clone))\b',
+        re.IGNORECASE
+    )
+
+    if git_clone_pattern.search(command):
+        # Check if --progress is already present
+        if '--progress' not in command and '--quiet' not in command:
+            # Insert --progress after 'clone' or before the repository URL
+            # For 'git clone <url>', make it 'git clone --progress <url>'
+            # For 'gh repo fork --clone', gh doesn't support --progress directly
+            if command.startswith('git clone'):
+                # Insert --progress after 'clone'
+                command = re.sub(
+                    r'(\bgit\s+clone\b)',
+                    r'\1 --progress',
+                    command,
+                    count=1
+                )
+            elif 'gh repo fork' in command or 'gh repo clone' in command:
+                # gh CLI doesn't have --progress, but we can set GIT_PROGRESS=1
+                # This enables progress for git operations under the hood
+                if 'GIT_PROGRESS=1' not in command:
+                    command = f'GIT_PROGRESS=1 {command}'
+                    logger.info("Enabled GIT_PROGRESS for gh repo command to support adaptive timeout")
+
+    return command
+
+
 def terminal_tool(
     command: str,
     background: bool = False,
@@ -1682,6 +1726,10 @@ def terminal_tool(
         # Get configuration
         config = _get_env_config()
         env_type = config["env_type"]
+
+        # Preprocess command to enable adaptive timeout detection
+        # This adds progress output to commands that would otherwise be silent
+        command = _preprocess_command_for_adaptive_timeout(command)
 
         # Use task_id for environment isolation. By default all subagent
         # task_ids collapse back to "default" so the top-level agent and

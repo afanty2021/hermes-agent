@@ -178,6 +178,43 @@ def get_toolset_for_tool(tool_name: str) -> str:
 - **支持后端**：local、docker、ssh、modal、daytona、singularity
 - **特性**：后台进程、实时输出、工作目录管理
 
+#### 自适应空闲超时机制
+
+Hermes 实现了智能的空闲超时机制，允许长时间运行的命令（如 `git clone`）在持续产生输出时继续执行。
+
+**工作原理**：
+- **固定超时**（`timeout`）：命令的最大执行时间，默认 180 秒
+- **空闲超时**（`idle_timeout`）：无输出活动的时间限制，默认 60 秒
+- 只要命令持续产生输出，就不会触发空闲超时
+- 两个超时条件任一触发即终止命令
+
+**配置选项**：
+```yaml
+# ~/.hermes/config.yaml
+terminal:
+  timeout: 180      # 固定超时（最大执行时间）
+  idle_timeout: 60  # 空闲超时（无输出活动时间）
+```
+
+**命令预处理**：
+对于某些在长时间操作期间默认不产生输出的命令（如 `git clone`），Hermes 会自动添加进度输出选项：
+
+| 命令 | 预处理结果 |
+|------|-----------|
+| `git clone <url>` | `git clone --progress <url>` |
+| `gh repo fork --clone` | `GIT_PROGRESS=1 gh repo fork --clone` |
+| `gh repo clone` | `GIT_PROGRESS=1 gh repo clone` |
+
+这样即使在没有 TTY 的环境下，Git 也会产生持续的进度输出，让空闲超时机制正常工作。
+
+**示例**：
+```bash
+# 克隆大型仓库不会因为网络慢而超时
+hermes> git clone https://github.com/large/repo.git
+# 自动变为: git clone --progress https://github.com/large/repo.git
+# 只要有输出（进度更新），就不会触发空闲超时
+```
+
 ### 文件工具 (file_tools.py)
 - **功能**：读取、写入、搜索、修补文件
 - **特性**：大文件分块读取、智能搜索、diff 补丁

@@ -620,6 +620,59 @@ hermes config set provider zai-coding-cn
 - 🚀 **更快速**：专门针对代码生成优化的端点
 - 🎯 **更准确**：针对编程任务优化的模型
 
+### 自适应空闲超时机制 ⏱️
+
+**功能**：基于输出活动的智能超时机制，允许长时间运行的命令（如 git clone）在持续产生输出时继续执行
+
+**修改内容**：
+
+1. **空闲超时检测** (`tools/environments/base.py:534-617`)
+   ```python
+   # 跟踪输出活动
+   _last_output_activity = _now
+   _last_output_count = 0
+
+   # 检测输出增长
+   _current_output_count = len(output_chunks)
+   if _current_output_count > _last_output_count:
+       _last_output_activity = time.monotonic()
+       _last_output_count = _current_output_count
+
+   # 双重超时条件
+   _hard_timeout = _now > deadline  # 固定超时
+   _idle_timeout_exceeded = _now - _last_output_activity > _idle_timeout  # 空闲超时
+   ```
+
+2. **配置选项** (`hermes_cli/config.py`)
+   ```yaml
+   terminal:
+     timeout: 180      # 固定超时（最大执行时间）
+     idle_timeout: 60  # 空闲超时（无输出活动时间）
+   ```
+
+3. **命令预处理** (`tools/terminal_tool.py:1628-1669`)
+   ```python
+   def _preprocess_command_for_adaptive_timeout(command: str) -> str:
+       # 自动为 git clone 添加 --progress
+       # 为 gh repo 命令添加 GIT_PROGRESS=1
+   ```
+
+**工作原理**：
+- **固定超时**：命令的最大执行时间（默认 180 秒）
+- **空闲超时**：无输出活动的时间限制（默认 60 秒）
+- 只要命令持续产生输出，就不会触发空闲超时
+- 自动为 git clone 等命令添加进度输出选项
+
+**提交信息**：
+- 提交：`f163bf40` feat(terminal): add adaptive idle timeout for long-running commands
+- 日期：2026-05-04
+
+**优势**：
+- 🎯 **真正的自适应**：基于实际输出活动而非固定时间
+- 🔄 **自动优化**：无需手动调整超时时间
+- 🚀 **适合大文件**：git clone 等操作不会因为网络慢而超时
+- 🛡️ **防止挂死**：无输出时仍会触发超时，避免进程卡死
+
 ## 相关资源
 
 ### 官方文档
