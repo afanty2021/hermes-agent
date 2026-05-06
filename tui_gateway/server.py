@@ -1414,6 +1414,10 @@ def _session_info(agent) -> dict:
     except Exception:
         info["mcp_servers"] = []
     try:
+        info["system_prompt"] = getattr(agent, "_cached_system_prompt", "") or ""
+    except Exception:
+        pass
+    try:
         from hermes_cli.banner import get_update_result
         from hermes_cli.config import recommended_update_command
 
@@ -1472,6 +1476,11 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
         n = _count_list(data, "results") or _count_list(data, "data", "results")
         if n is not None:
             text = f"Extracted {n} {'page' if n == 1 else 'pages'}"
+
+    if isinstance(data, dict) and data.get("fallback_warning"):
+        warning = str(data.get("fallback_warning") or "").strip()
+        if warning:
+            return f"{warning}{suffix}"
 
     return f"{text}{suffix}" if text else None
 

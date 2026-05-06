@@ -61,12 +61,14 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("z-ai/glm-5v-turbo",               ""),
     ("z-ai/glm-5-turbo",                ""),
     ("x-ai/grok-4.20",                  ""),
+    ("x-ai/grok-4.3",                   ""),
     ("nvidia/nemotron-3-super-120b-a12b",      ""),
     ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
     ("arcee-ai/trinity-large-preview:free", "free"),
     ("arcee-ai/trinity-large-thinking",  ""),
     ("openai/gpt-5.5-pro",              ""),
     ("openai/gpt-5.4-nano",             ""),
+    ("deepseek/deepseek-v4-pro",        ""),
 ]
 
 _openrouter_catalog_cache: list[tuple[str, str]] | None = None
@@ -181,10 +183,12 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "z-ai/glm-5v-turbo",
         "z-ai/glm-5-turbo",
         "x-ai/grok-4.20-beta",
+        "x-ai/grok-4.3",
         "nvidia/nemotron-3-super-120b-a12b",
         "arcee-ai/trinity-large-thinking",
         "openai/gpt-5.5-pro",
         "openai/gpt-5.4-nano",
+        "deepseek/deepseek-v4-pro",
     ],
     # Native OpenAI Chat Completions (api.openai.com). Used by /model counts and
     # provider_model_ids fallback when /v1/models is unavailable.
@@ -809,9 +813,9 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
 ]
 
 # Auto-extend CANONICAL_PROVIDERS with any provider registered in providers/
-# that is not already in the list above.  Adding providers/*.py is sufficient
-# to expose a new provider in the model picker, /model, and all downstream
-# consumers — no edits to this file needed.
+# that is not already in the list above.  Adding plugins/model-providers/<name>/
+# is sufficient to expose a new provider in the model picker, /model, and all
+# downstream consumers — no edits to this file needed.
 _canonical_slugs = {p.slug for p in CANONICAL_PROVIDERS}
 try:
     from providers import list_providers as _list_providers_for_canonical
