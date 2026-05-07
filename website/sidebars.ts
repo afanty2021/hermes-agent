@@ -77,6 +77,7 @@ const sidebars: SidebarsConfig = {
           label: 'Media & Web',
           items: [
             'user-guide/features/voice-mode',
+            'user-guide/features/web-search',
             'user-guide/features/browser',
             'user-guide/features/vision',
             'user-guide/features/image-generation',
@@ -211,6 +212,7 @@ const sidebars: SidebarsConfig = {
             'developer-guide/memory-provider-plugin',
             'developer-guide/context-engine-plugin',
             'developer-guide/model-provider-plugin',
+            'developer-guide/image-gen-provider-plugin',
             'developer-guide/creating-skills',
             'developer-guide/extending-the-cli',
           ],
