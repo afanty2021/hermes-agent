@@ -2387,7 +2387,15 @@ def systemd_stop(system: bool = False):
             write_planned_stop_marker(pid)
     except Exception:
         pass
-    _run_systemctl(["stop", get_service_name()], system=system, check=True, timeout=90)
+    try:
+        _run_systemctl(["stop", get_service_name()], system=system, check=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        label = _service_scope_label(system)
+        print(
+            f"Gateway {label} service is still stopping after 90s; "
+            "check `hermes gateway status` or logs for final shutdown state."
+        )
+        return
     print(f"✓ {_service_scope_label(system).capitalize()} service stopped")
 
 
@@ -2448,6 +2456,13 @@ def systemd_restart(system: bool = False):
                 _print_systemd_start_limit_wait(system=system)
                 return
             raise
+        except subprocess.TimeoutExpired:
+            label = _service_scope_label(system)
+            print(
+                f"Gateway {label} service is still restarting after 90s; "
+                "check `hermes gateway status` or logs for final state."
+            )
+            return
         _wait_for_systemd_service_restart(system=system, previous_pid=pid)
         return
 
@@ -2467,6 +2482,13 @@ def systemd_restart(system: bool = False):
             _print_systemd_start_limit_wait(system=system)
             return
         raise
+    except subprocess.TimeoutExpired:
+        label = _service_scope_label(system)
+        print(
+            f"Gateway {label} service is still restarting after 90s; "
+            "check `hermes gateway status` or logs for final state."
+        )
+        return
     _wait_for_systemd_service_restart(system=system, previous_pid=pid)
 
 
@@ -4717,6 +4739,9 @@ def gateway_setup():
                         systemd_restart()
                     elif is_macos():
                         launchd_restart()
+                    elif is_windows():
+                        from hermes_cli import gateway_windows
+                        gateway_windows.restart()
                     else:
                         stop_profile_gateway()
                         print_info("Start manually: hermes gateway")
@@ -4738,6 +4763,9 @@ def gateway_setup():
                         systemd_start()
                     elif is_macos():
                         launchd_start()
+                    elif is_windows():
+                        from hermes_cli import gateway_windows
+                        gateway_windows.start()
                 except UserSystemdUnavailableError as e:
                     print_error("  Start failed — user systemd not reachable:")
                     for line in str(e).splitlines():
@@ -4749,20 +4777,34 @@ def gateway_setup():
                     print_error(f"  Start failed: {e}")
         else:
             print()
-            if supports_systemd_services() or is_macos():
-                platform_name = "systemd" if supports_systemd_services() else "launchd"
+            if supports_systemd_services() or is_macos() or is_windows():
+                if supports_systemd_services():
+                    platform_name = "systemd"
+                elif is_macos():
+                    platform_name = "launchd"
+                else:
+                    platform_name = "Scheduled Task"
                 wsl_note = " (note: services may not survive WSL restarts)" if is_wsl() else ""
                 if prompt_yes_no(f"  Install the gateway as a {platform_name} service?{wsl_note} (runs in background, starts on boot)", True):
                     try:
                         installed_scope = None
                         did_install = False
+                        started_inline = False
                         if supports_systemd_services():
                             installed_scope, did_install = install_linux_gateway_from_setup(force=False)
-                        else:
+                        elif is_macos():
                             launchd_install(force=False)
                             did_install = True
+                        else:
+                            # gateway_windows.install() registers the Scheduled
+                            # Task AND starts it (schtasks /Run or direct-spawn
+                            # fallback), so no separate start prompt is needed.
+                            from hermes_cli import gateway_windows
+                            gateway_windows.install(force=False)
+                            did_install = True
+                            started_inline = True
                         print()
-                        if did_install and prompt_yes_no("  Start the service now?", True):
+                        if did_install and not started_inline and prompt_yes_no("  Start the service now?", True):
                             try:
                                 if supports_systemd_services():
                                     systemd_start(system=installed_scope == "system")
