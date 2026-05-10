@@ -1075,6 +1075,7 @@ class AIAgent:
         provider_sort: str = None,
         provider_require_parameters: bool = False,
         provider_data_collection: str = None,
+        openrouter_min_coding_score: Optional[float] = None,
         session_id: str = None,
         tool_progress_callback: callable = None,
         tool_start_callback: callable = None,
@@ -1137,6 +1138,9 @@ class AIAgent:
             providers_ignored (List[str]): OpenRouter providers to ignore (optional)
             providers_order (List[str]): OpenRouter providers to try in order (optional)
             provider_sort (str): Sort providers by price/throughput/latency (optional)
+            openrouter_min_coding_score (float): Coding-score floor (0.0-1.0) for the
+                openrouter/pareto-code router. Only applied when model == "openrouter/pareto-code".
+                None or empty = let OpenRouter pick the strongest available coder.
             session_id (str): Pre-generated session ID for logging (optional, auto-generated if not provided)
             tool_progress_callback (callable): Callback function(tool_name, args_preview) for progress notifications
             clarify_callback (callable): Callback function(question, choices) -> str for interactive user questions.
@@ -1356,6 +1360,7 @@ class AIAgent:
         self.provider_sort = provider_sort
         self.provider_require_parameters = provider_require_parameters
         self.provider_data_collection = provider_data_collection
+        self.openrouter_min_coding_score = openrouter_min_coding_score
 
         # Store toolset filtering options
         self.enabled_toolsets = enabled_toolsets
@@ -1660,10 +1665,15 @@ class AIAgent:
                             _fb_entries = [fallback_model]
                         _fb_resolved = False
                         for _fb in _fb_entries:
+                            _fb_explicit_key = (_fb.get("api_key") or "").strip() or None
+                            if not _fb_explicit_key:
+                                _fb_key_env = (_fb.get("key_env") or _fb.get("api_key_env") or "").strip()
+                                if _fb_key_env:
+                                    _fb_explicit_key = os.getenv(_fb_key_env, "").strip() or None
                             _fb_client, _fb_model = resolve_provider_client(
                                 _fb["provider"], model=_fb["model"], raw_codex=True,
                                 explicit_base_url=_fb.get("base_url"),
-                                explicit_api_key=_fb.get("api_key"),
+                                explicit_api_key=_fb_explicit_key,
                             )
                             if _fb_client is not None:
                                 self.provider = _fb["provider"]
@@ -2395,6 +2405,25 @@ class AIAgent:
                 "anthropic_base_url": self._anthropic_base_url,
                 "is_anthropic_oauth": self._is_anthropic_oauth,
             })
+
+    def _get_session_db_for_recall(self):
+        """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
+
+        Most frontends pass ``session_db`` into ``AIAgent`` explicitly, but recall
+        is important enough that a missing constructor argument should degrade by
+        opening the default state DB instead of making the advertised
+        ``session_search`` tool unusable.
+        """
+        if self._session_db is not None:
+            return self._session_db
+        try:
+            from hermes_state import SessionDB
+
+            self._session_db = SessionDB()
+            return self._session_db
+        except Exception as exc:
+            logger.debug("SessionDB unavailable for recall", exc_info=True)
+            return None
 
     def _ensure_db_session(self) -> None:
         """Create session DB row on first use. Disables _session_db on failure."""
@@ -3529,6 +3558,19 @@ class AIAgent:
         # instead of returning structured reasoning fields.  Only fall back
         # to inline extraction when no structured reasoning was found.
         content = getattr(assistant_message, "content", None)
+        if not reasoning_parts and isinstance(content, list):
+            # DeepSeek V4 Pro (and compatible providers) return content as a
+            # list of typed blocks, e.g.:
+            #   [{"type": "thinking", "thinking": "..."}, {"type": "output", ...}]
+            # Without this branch the thinking text is silently dropped and the
+            # next turn fails with HTTP 400 ("thinking must be passed back").
+            # Refs #21944.
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "thinking":
+                    thinking_text = block.get("thinking") or block.get("text") or ""
+                    thinking_text = thinking_text.strip()
+                    if thinking_text and thinking_text not in reasoning_parts:
+                        reasoning_parts.append(thinking_text)
         if not reasoning_parts and isinstance(content, str) and content:
             inline_patterns = (
                 r"<think>(.*?)</think>",
@@ -5067,12 +5109,25 @@ class AIAgent:
         Called when session_id rotates (e.g. /new, context compression);
         providers keep their state and continue running under the old
         session_id — they just flush pending extraction now."""
-        if not self._memory_manager:
-            return
-        try:
-            self._memory_manager.on_session_end(messages or [])
-        except Exception:
-            pass
+        if self._memory_manager:
+            try:
+                self._memory_manager.on_session_end(messages or [])
+            except Exception:
+                pass
+        # Notify context engine of session end too — same lifecycle moment as
+        # the memory manager's on_session_end. Without this, engines that
+        # accumulate per-session state (DAGs, summaries) leak that state from
+        # the rotated-out session into whatever comes next under the same
+        # compressor instance. Mirrors the call in shutdown_memory_provider().
+        # See issue #22394.
+        if hasattr(self, "context_compressor") and self.context_compressor:
+            try:
+                self.context_compressor.on_session_end(
+                    self.session_id or "",
+                    messages or [],
+                )
+            except Exception:
+                pass
 
     def _sync_external_memory_for_turn(
         self,
@@ -8029,6 +8084,32 @@ class AIAgent:
         if not fb_provider or not fb_model:
             return self._try_activate_fallback()  # skip invalid, try next
 
+        # Skip entries that resolve to the current (provider, model) — falling
+        # back to the same backend that just failed loops the failure. Compare
+        # base_url too so two distinct custom_providers entries pointing at the
+        # same shim/proxy URL also dedup. See issue #22548.
+        current_provider = (getattr(self, "provider", "") or "").strip().lower()
+        current_model = (getattr(self, "model", "") or "").strip()
+        current_base_url = str(getattr(self, "base_url", "") or "").rstrip("/").lower()
+        fb_base_url_for_dedup = (fb.get("base_url") or "").strip().rstrip("/").lower()
+        if fb_provider == current_provider and fb_model == current_model:
+            logging.warning(
+                "Fallback skip: chain entry %s/%s matches current provider/model",
+                fb_provider, fb_model,
+            )
+            return self._try_activate_fallback()
+        if (
+            fb_base_url_for_dedup
+            and current_base_url
+            and fb_base_url_for_dedup == current_base_url
+            and fb_model == current_model
+        ):
+            logging.warning(
+                "Fallback skip: chain entry base_url %s matches current backend",
+                fb_base_url_for_dedup,
+            )
+            return self._try_activate_fallback()
+
         # Use centralized router for client construction.
         # raw_codex=True because the main agent needs direct responses.stream()
         # access for Codex providers.
@@ -8040,7 +8121,9 @@ class AIAgent:
             fb_base_url_hint = (fb.get("base_url") or "").strip() or None
             fb_api_key_hint = (fb.get("api_key") or "").strip() or None
             if not fb_api_key_hint:
-                fb_key_env = (fb.get("key_env") or "").strip()
+                # key_env and api_key_env are both documented aliases (see
+                # _normalize_custom_provider_entry in hermes_cli/config.py).
+                fb_key_env = (fb.get("key_env") or fb.get("api_key_env") or "").strip()
                 if fb_key_env:
                     fb_api_key_hint = os.getenv(fb_key_env, "").strip() or None
             # For Ollama Cloud endpoints, pull OLLAMA_API_KEY from env
@@ -8958,6 +9041,7 @@ class AIAgent:
                 ollama_num_ctx=self._ollama_num_ctx,
                 # Context forwarded to profile hooks:
                 provider_preferences=_prefs or None,
+                openrouter_min_coding_score=self.openrouter_min_coding_score,
                 anthropic_max_output=_ant_max,
                 supports_reasoning=self._supports_reasoning_extra_body(),
                 qwen_session_metadata=_qwen_meta,
@@ -8997,6 +9081,7 @@ class AIAgent:
             is_custom_provider=self.provider == "custom",
             ollama_num_ctx=self._ollama_num_ctx,
             provider_preferences=_prefs or None,
+            openrouter_min_coding_score=self.openrouter_min_coding_score,
             qwen_prepare_fn=self._qwen_prepare_chat_messages if _is_qwen else None,
             qwen_prepare_inplace_fn=self._qwen_prepare_chat_messages_inplace if _is_qwen else None,
             qwen_session_metadata=_qwen_meta,
@@ -9868,14 +9953,16 @@ class AIAgent:
                 store=self._todo_store,
             )
         elif function_name == "session_search":
-            if not self._session_db:
-                return json.dumps({"success": False, "error": "Session database not available."})
+            session_db = self._get_session_db_for_recall()
+            if not session_db:
+                from hermes_state import format_session_db_unavailable
+                return json.dumps({"success": False, "error": format_session_db_unavailable()})
             from tools.session_search_tool import session_search as _session_search
             return _session_search(
                 query=function_args.get("query", ""),
                 role_filter=function_args.get("role_filter"),
                 limit=function_args.get("limit", 3),
-                db=self._session_db,
+                db=session_db,
                 current_session_id=self.session_id,
             )
         elif function_name == "memory":
@@ -10491,15 +10578,17 @@ class AIAgent:
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('todo', function_args, tool_duration, result=function_result)}")
             elif function_name == "session_search":
-                if not self._session_db:
-                    function_result = json.dumps({"success": False, "error": "Session database not available."})
+                session_db = self._get_session_db_for_recall()
+                if not session_db:
+                    from hermes_state import format_session_db_unavailable
+                    function_result = json.dumps({"success": False, "error": format_session_db_unavailable()})
                 else:
                     from tools.session_search_tool import session_search as _session_search
                     function_result = _session_search(
                         query=function_args.get("query", ""),
                         role_filter=function_args.get("role_filter"),
                         limit=function_args.get("limit", 3),
-                        db=self._session_db,
+                        db=session_db,
                         current_session_id=self.session_id,
                     )
                 tool_duration = time.time() - tool_start_time
@@ -10899,6 +10988,27 @@ class AIAgent:
                 ):
                     summary_extra_body["provider"] = provider_preferences
 
+                # Pareto Code router plugin — model-gated. Same shape as
+                # the main-loop emission so summary calls on
+                # openrouter/pareto-code respect the user's coding-score floor.
+                if (
+                    self.model == "openrouter/pareto-code"
+                    and (
+                        (self.provider or "").strip().lower() == "openrouter"
+                        or self._is_openrouter_url()
+                    )
+                    and self.openrouter_min_coding_score is not None
+                    and self.openrouter_min_coding_score != ""
+                ):
+                    try:
+                        _ps = float(self.openrouter_min_coding_score)
+                    except (TypeError, ValueError):
+                        _ps = None
+                    if _ps is not None and 0.0 <= _ps <= 1.0:
+                        summary_extra_body["plugins"] = [
+                            {"id": "pareto-router", "min_coding_score": _ps}
+                        ]
+
                 if summary_extra_body:
                     summary_kwargs["extra_body"] = summary_extra_body
 
@@ -11112,7 +11222,29 @@ class AIAgent:
         # recover the todo state from the most recent todo tool response in history)
         if conversation_history and not self._todo_store.has_items():
             self._hydrate_todo_store(conversation_history)
-        
+
+        # Hydrate per-session nudge counters from persisted history.
+        # Gateway creates a fresh AIAgent per inbound message (cache miss /
+        # 1h idle eviction / config-signature mismatch / process restart), so
+        # _turns_since_memory and _user_turn_count start at 0 every turn and
+        # the memory.nudge_interval trigger may never be reached. Reconstruct
+        # an effective count from prior user turns in conversation_history.
+        # Idempotent: a cached agent that already accumulated counters keeps
+        # them; only a freshly-built agent with empty in-memory state hydrates.
+        # See issue #22357.
+        if conversation_history and self._user_turn_count == 0:
+            prior_user_turns = sum(
+                1 for m in conversation_history if m.get("role") == "user"
+            )
+            if prior_user_turns > 0:
+                self._user_turn_count = prior_user_turns
+                if self._memory_nudge_interval > 0 and self._turns_since_memory == 0:
+                    # % preserves original 1-in-N cadence rather than firing a
+                    # review immediately on resume (which would surprise users
+                    # whose session happened to land just past a multiple of N).
+                    self._turns_since_memory = prior_user_turns % self._memory_nudge_interval
+
+
         # Prefill messages (few-shot priming) are injected at API-call time only,
         # never stored in the messages list. This keeps them ephemeral: they won't
         # be saved to session DB, session logs, or batch trajectories, but they're
