@@ -2589,6 +2589,8 @@ def _model_flow_nous(config, current_model="", args=None):
         get_pricing_for_provider,
         check_nous_free_tier,
         partition_nous_models_by_tier,
+        union_with_portal_free_recommendations,
+        union_with_portal_paid_recommendations,
     )
 
     model_ids = get_curated_nous_model_ids()
@@ -2629,19 +2631,8 @@ def _model_flow_nous(config, current_model="", args=None):
     # Check if user is on free tier
     free_tier = check_nous_free_tier()
 
-    # For free users: partition models into selectable/unavailable based on
-    # whether they are free per the Portal-reported pricing.
-    unavailable_models: list[str] = []
-    if free_tier:
-        model_ids, unavailable_models = partition_nous_models_by_tier(
-            model_ids, pricing, free_tier=True
-        )
-
-    if not model_ids and not unavailable_models:
-        print("No models available for Nous Portal after filtering.")
-        return
-
-    # Resolve portal URL for upgrade links (may differ on staging)
+    # Resolve portal URL early — needed both for upgrade links and for the
+    # freeRecommendedModels endpoint below.
     _nous_portal_url = ""
     try:
         _nous_state = get_provider_auth_state("nous")
@@ -2649,6 +2640,32 @@ def _model_flow_nous(config, current_model="", args=None):
             _nous_portal_url = _nous_state.get("portal_base_url", "")
     except Exception:
         pass
+
+    # For free users: partition models into selectable/unavailable based on
+    # whether they are free per the Portal-reported pricing.  First augment
+    # with the Portal's freeRecommendedModels list so newly-launched free
+    # models show up even if this CLI build's hardcoded curated list and
+    # docs-hosted manifest haven't caught up yet.
+    #
+    # For paid users: mirror the same idea with paidRecommendedModels so
+    # newly-launched paid models surface in the picker too — independent
+    # of CLI release cadence.
+    unavailable_models: list[str] = []
+    if free_tier:
+        model_ids, pricing = union_with_portal_free_recommendations(
+            model_ids, pricing, _nous_portal_url,
+        )
+        model_ids, unavailable_models = partition_nous_models_by_tier(
+            model_ids, pricing, free_tier=True
+        )
+    else:
+        model_ids, pricing = union_with_portal_paid_recommendations(
+            model_ids, pricing, _nous_portal_url,
+        )
+
+    if not model_ids and not unavailable_models:
+        print("No models available for Nous Portal after filtering.")
+        return
 
     if free_tier and not model_ids:
         print("No free models currently available.")
@@ -9373,7 +9390,7 @@ def main():
     gateway_parser = subparsers.add_parser(
         "gateway",
         help="Messaging gateway management",
-        description="Manage the messaging gateway (Telegram, Discord, WhatsApp)",
+        description="Manage the messaging gateway (Telegram, Discord, WhatsApp, Weixin, and more)",
     )
     gateway_subparsers = gateway_parser.add_subparsers(dest="gateway_command")
 
@@ -9515,6 +9532,17 @@ def main():
     )
 
     gateway_parser.set_defaults(func=cmd_gateway)
+
+    # =========================================================================
+    # lsp command
+    # =========================================================================
+    try:
+        from agent.lsp.cli import register_subparser as _lsp_register
+        _lsp_register(subparsers)
+    except Exception as _lsp_err:  # noqa: BLE001
+        # LSP is optional infrastructure — never let a registration
+        # failure break the CLI overall.
+        logger.debug("LSP CLI registration failed: %s", _lsp_err)
 
     # =========================================================================
     # setup command
@@ -10077,6 +10105,16 @@ def main():
     )
     doctor_parser.add_argument(
         "--fix", action="store_true", help="Attempt to fix issues automatically"
+    )
+    doctor_parser.add_argument(
+        "--ack",
+        metavar="ADVISORY_ID",
+        default=None,
+        help=(
+            "Acknowledge a security advisory by ID and exit. After ack, the "
+            "advisory will no longer trigger startup banners. Run `hermes "
+            "doctor` first to see active advisories and their IDs."
+        ),
     )
     doctor_parser.set_defaults(func=cmd_doctor)
 
