@@ -1275,7 +1275,7 @@ class AIAgent:
             self.api_mode = api_mode
         elif self.provider == "openai-codex":
             self.api_mode = "codex_responses"
-        elif self.provider == "xai":
+        elif self.provider in {"xai", "xai-oauth"}:
             self.api_mode = "codex_responses"
         elif (provider_name is None) and (
             self._base_url_hostname == "chatgpt.com"
@@ -1664,6 +1664,9 @@ class AIAgent:
                 if base_url_host_matches(effective_base, "openrouter.ai"):
                     from agent.auxiliary_client import build_or_headers
                     client_kwargs["default_headers"] = build_or_headers()
+                elif base_url_host_matches(effective_base, "integrate.api.nvidia.com"):
+                    from agent.auxiliary_client import build_nvidia_nim_headers
+                    client_kwargs["default_headers"] = build_nvidia_nim_headers(effective_base)
                 elif base_url_host_matches(effective_base, "api.routermint.com"):
                     client_kwargs["default_headers"] = _routermint_headers()
                 elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
@@ -1702,9 +1705,15 @@ class AIAgent:
                     }
                     if _provider_timeout is not None:
                         client_kwargs["timeout"] = _provider_timeout
-                    # Preserve any default_headers the router set
-                    if hasattr(_routed_client, '_default_headers') and _routed_client._default_headers:
-                        client_kwargs["default_headers"] = dict(_routed_client._default_headers)
+                    # Preserve provider-specific headers the router set.  The
+                    # OpenAI SDK stores caller-provided default_headers in
+                    # _custom_headers; older/mocked clients may expose
+                    # _default_headers instead.
+                    _routed_headers = getattr(_routed_client, "_custom_headers", None)
+                    if not _routed_headers:
+                        _routed_headers = getattr(_routed_client, "_default_headers", None)
+                    if _routed_headers:
+                        client_kwargs["default_headers"] = dict(_routed_headers)
                 else:
                     # When the user explicitly chose a non-OpenRouter provider
                     # but no credentials were found, fail fast with a clear
@@ -1753,8 +1762,11 @@ class AIAgent:
                                 }
                                 if _provider_timeout is not None:
                                     client_kwargs["timeout"] = _provider_timeout
-                                if hasattr(_fb_client, "_default_headers") and _fb_client._default_headers:
-                                    client_kwargs["default_headers"] = dict(_fb_client._default_headers)
+                                _fb_headers = getattr(_fb_client, "_custom_headers", None)
+                                if not _fb_headers:
+                                    _fb_headers = getattr(_fb_client, "_default_headers", None)
+                                if _fb_headers:
+                                    client_kwargs["default_headers"] = dict(_fb_headers)
                                 _fb_resolved = True
                                 break
                         if not _fb_resolved:
@@ -4955,6 +4967,45 @@ class AIAgent:
         _save_trajectory_to_file(trajectory, self.model, completed)
 
     @staticmethod
+    def _decorate_xai_entitlement_error(detail: str) -> str:
+        """Append a friendly hint when xAI's OAuth surface returns an
+        entitlement-shaped error.
+
+        xAI's ``/v1/responses`` endpoint replies to OAuth tokens that lack a
+        SuperGrok / X Premium subscription with HTTP 403 carrying a body like::
+
+            {"code": "The caller does not have permission to execute the
+             specified operation", "error": "You have either run out of
+             available resources or do not have an active Grok subscription.
+             Manage subscriptions at https://grok.com/..."}
+
+        The raw text is useful but the action the user needs to take (subscribe
+        on grok.com, or switch providers with ``/model``) isn't obvious from
+        the wire format.  Detect the entitlement shape and append a hint.
+
+        Matched once per detail string — won't double-decorate if the upstream
+        already concatenated the same text.
+        """
+        if not detail:
+            return detail
+        lower = detail.lower()
+        is_entitlement = (
+            "do not have an active grok subscription" in lower
+            or ("out of available resources" in lower and "grok" in lower)
+            or ("does not have permission" in lower and "grok" in lower)
+        )
+        if not is_entitlement:
+            return detail
+        hint = (
+            " — xAI OAuth account lacks SuperGrok / X Premium entitlement for "
+            "this model. Subscribe at https://grok.com or run `/model` to "
+            "switch providers."
+        )
+        if hint.strip() in detail:
+            return detail
+        return f"{detail}{hint}"
+
+    @staticmethod
     def _summarize_api_error(error: Exception) -> str:
         """Extract a human-readable one-liner from an API error.
 
@@ -4987,12 +5038,12 @@ class AIAgent:
             if msg:
                 status_code = getattr(error, "status_code", None)
                 prefix = f"HTTP {status_code}: " if status_code else ""
-                return f"{prefix}{msg[:300]}"
+                return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
 
         # Fallback: truncate the raw string but give more room than 200 chars
         status_code = getattr(error, "status_code", None)
         prefix = f"HTTP {status_code}: " if status_code else ""
-        return f"{prefix}{raw[:500]}"
+        return AIAgent._decorate_xai_entitlement_error(f"{prefix}{raw[:500]}")
 
     def _mask_api_key_for_logs(self, key: Optional[str]) -> Optional[str]:
         if not key:
@@ -7044,18 +7095,48 @@ class AIAgent:
             except RuntimeError as exc:
                 err_text = str(exc)
                 missing_completed = "response.completed" in err_text
-                if missing_completed and attempt < max_stream_retries:
+                # The OpenAI SDK's Responses streaming state machine raises
+                # ``RuntimeError("Expected to have received `response.created`
+                # before `<event-type>`")`` when the first SSE event from the
+                # server is anything other than ``response.created`` — and it
+                # discards the event's payload before we can read it.  Three
+                # real-world backends emit a different first frame:
+                #
+                #   * xAI on grok-4.x OAuth — sends ``error`` (issues
+                #     reported around the May 2026 SuperGrok rollout when
+                #     multi-turn conversations replay encrypted reasoning
+                #     content the OAuth tier rejects)
+                #   * codex-lb relays — send ``codex.rate_limits`` (#14634)
+                #   * custom Responses relays — send ``response.in_progress``
+                #     (#8133)
+                #
+                # In all three cases the underlying byte stream is still
+                # readable: a non-stream ``responses.create(stream=True)``
+                # fallback succeeds and surfaces the real provider error as
+                # a normal exception with body+status_code attached, which
+                # ``_summarize_api_error`` can then translate into a useful
+                # user-facing line.  Treat ``response.created`` prelude
+                # errors the same way we already treat ``response.completed``
+                # postlude errors.
+                prelude_error = (
+                    "Expected to have received `response.created`" in err_text
+                    or "Expected to have received \"response.created\"" in err_text
+                )
+                if (missing_completed or prelude_error) and attempt < max_stream_retries:
                     logger.debug(
-                        "Responses stream closed before completion (attempt %s/%s); retrying. %s",
+                        "Responses stream %s (attempt %s/%s); retrying. %s",
+                        "prelude rejected" if prelude_error else "closed before completion",
                         attempt + 1,
                         max_stream_retries + 1,
                         self._client_log_context(),
                     )
                     continue
-                if missing_completed:
+                if missing_completed or prelude_error:
                     logger.debug(
-                        "Responses stream did not emit response.completed; falling back to create(stream=True). %s",
+                        "Responses stream %s; falling back to create(stream=True). %s err=%s",
+                        "rejected before response.created" if prelude_error else "did not emit response.completed",
                         self._client_log_context(),
+                        err_text,
                     )
                     return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
                 raise
@@ -7139,15 +7220,60 @@ class AIAgent:
         raise RuntimeError("Responses create(stream=True) fallback did not emit a terminal response.")
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
-        if self.api_mode != "codex_responses" or self.provider != "openai-codex":
+        if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
+            return False
+
+        # Guard against silent account swap.
+        #
+        # When an agent is using a non-singleton credential — e.g. a manual
+        # pool entry (``hermes auth add xai-oauth``) whose tokens belong to
+        # a different account than the loopback_pkce singleton, or an agent
+        # constructed with an explicit ``api_key=`` arg — force-refreshing
+        # the singleton here and adopting its tokens silently re-routes the
+        # rest of the conversation onto the singleton's account.  The
+        # credential pool's reactive recovery (``_recover_with_credential_pool``)
+        # is the right channel for that case; this path is the
+        # singleton-only fallback used when the pool can't recover, and
+        # MUST only fire when the agent really is on singleton tokens.
+        try:
+            if self.provider == "openai-codex":
+                from hermes_cli.auth import resolve_codex_runtime_credentials
+
+                singleton_now = resolve_codex_runtime_credentials(
+                    refresh_if_expiring=False,
+                )
+            else:
+                from hermes_cli.auth import resolve_xai_oauth_runtime_credentials
+
+                singleton_now = resolve_xai_oauth_runtime_credentials(
+                    refresh_if_expiring=False,
+                )
+        except Exception as exc:
+            logger.debug("%s singleton read failed: %s", self.provider, exc)
+            return False
+
+        singleton_key = str(singleton_now.get("api_key") or "").strip()
+        active_key = str(self.api_key or "").strip()
+        if singleton_key and active_key and singleton_key != active_key:
+            logger.debug(
+                "%s singleton tokens differ from the active api_key; "
+                "skipping singleton force-refresh to avoid silent account swap. "
+                "Reactive credential rotation should go through the pool.",
+                self.provider,
+            )
             return False
 
         try:
-            from hermes_cli.auth import resolve_codex_runtime_credentials
+            if self.provider == "openai-codex":
+                from hermes_cli.auth import resolve_codex_runtime_credentials
 
-            creds = resolve_codex_runtime_credentials(force_refresh=force)
+                creds = resolve_codex_runtime_credentials(force_refresh=force)
+            else:
+                from hermes_cli.auth import resolve_xai_oauth_runtime_credentials
+
+                creds = resolve_xai_oauth_runtime_credentials(force_refresh=force)
         except Exception as exc:
-            logger.debug("Codex credential refresh failed: %s", exc)
+            logger.debug("%s credential refresh failed: %s", self.provider, exc)
             return False
 
         api_key = creds.get("api_key")
@@ -7162,7 +7288,7 @@ class AIAgent:
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
 
-        if not self._replace_primary_openai_client(reason="codex_credential_refresh"):
+        if not self._replace_primary_openai_client(reason=f"{self.provider}_credential_refresh"):
             return False
 
         return True
@@ -7289,12 +7415,18 @@ class AIAgent:
         return True
 
     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
-        from agent.auxiliary_client import _AI_GATEWAY_HEADERS, build_or_headers
+        from agent.auxiliary_client import (
+            _AI_GATEWAY_HEADERS,
+            build_nvidia_nim_headers,
+            build_or_headers,
+        )
 
         if base_url_host_matches(base_url, "openrouter.ai"):
             self._client_kwargs["default_headers"] = build_or_headers()
         elif base_url_host_matches(base_url, "ai-gateway.vercel.sh"):
             self._client_kwargs["default_headers"] = dict(_AI_GATEWAY_HEADERS)
+        elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
+            self._client_kwargs["default_headers"] = build_nvidia_nim_headers(base_url)
         elif base_url_host_matches(base_url, "api.routermint.com"):
             self._client_kwargs["default_headers"] = _routermint_headers()
         elif base_url_host_matches(base_url, "api.githubcopilot.com"):
@@ -9631,7 +9763,7 @@ class AIAgent:
                     and "/backend-api/codex" in self._base_url_lower
                 )
             )
-            is_xai_responses = self.provider == "xai" or self._base_url_hostname == "api.x.ai"
+            is_xai_responses = self.provider in {"xai", "xai-oauth"} or self._base_url_hostname == "api.x.ai"
             _msgs_for_codex = self._prepare_messages_for_non_vision_model(api_messages)
             return _ct.build_kwargs(
                 model=self.model,
@@ -13700,13 +13832,14 @@ class AIAgent:
 
                     if (
                         self.api_mode == "codex_responses"
-                        and self.provider == "openai-codex"
+                        and self.provider in {"openai-codex", "xai-oauth"}
                         and status_code == 401
                         and not codex_auth_retry_attempted
                     ):
                         codex_auth_retry_attempted = True
                         if self._try_refresh_codex_client_credentials(force=True):
-                            self._vprint(f"{self.log_prefix}🔐 Codex auth refreshed after 401. Retrying request...")
+                            _label = "xAI OAuth" if self.provider == "xai-oauth" else "Codex"
+                            self._vprint(f"{self.log_prefix}🔐 {_label} auth refreshed after 401. Retrying request...")
                             continue
                     if (
                         self.api_mode == "chat_completions"
@@ -14346,11 +14479,15 @@ class AIAgent:
                         self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
                         # Actionable guidance for common auth errors
                         if classified.is_auth or classified.reason == FailoverReason.billing:
-                            if _provider == "openai-codex" and status_code == 401:
-                                self._vprint(f"{self.log_prefix}   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been", force=True)
-                                self._vprint(f"{self.log_prefix}      refreshed by another client (Codex CLI, VS Code). To fix:", force=True)
-                                self._vprint(f"{self.log_prefix}      1. Run `codex` in your terminal to generate fresh tokens.", force=True)
-                                self._vprint(f"{self.log_prefix}      2. Then run `hermes auth` to re-authenticate.", force=True)
+                            if _provider in {"openai-codex", "xai-oauth"} and status_code == 401:
+                                if _provider == "openai-codex":
+                                    self._vprint(f"{self.log_prefix}   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been", force=True)
+                                    self._vprint(f"{self.log_prefix}      refreshed by another client (Codex CLI, VS Code). To fix:", force=True)
+                                    self._vprint(f"{self.log_prefix}      1. Run `codex` in your terminal to generate fresh tokens.", force=True)
+                                    self._vprint(f"{self.log_prefix}      2. Then run `hermes auth` to re-authenticate.", force=True)
+                                else:
+                                    self._vprint(f"{self.log_prefix}   💡 xAI OAuth token was rejected (HTTP 401). To fix:", force=True)
+                                    self._vprint(f"{self.log_prefix}      re-authenticate with xAI Grok OAuth (SuperGrok Subscription) from `hermes model`.", force=True)
                             else:
                                 self._vprint(f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
                                 self._vprint(f"{self.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
