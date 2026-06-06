@@ -876,6 +876,73 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_ws_orphan_reap_closes_worker_when_session_stays_detached(monkeypatch):
+    """A detached WS session past its grace window has its slash_worker closed.
+
+    Regression for #38591 fallout: every dashboard refresh spawned a fresh
+    session + _SlashWorker but never reaped the previous one, leaking one
+    python subprocess per refresh.
+    """
+    closed = {"worker": False}
+
+    class _FakeWorker:
+        def close(self):
+            closed["worker"] = True
+
+    server._sessions["orphan-sid"] = _session(
+        transport=server._stdio_transport,
+        slash_worker=_FakeWorker(),
+        running=False,
+    )
+    # Run the reap body synchronously (no real timer/grace) to assert behaviour.
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0.01)
+    try:
+        # Directly invoke the orphaned-check + teardown the timer would run.
+        assert server._ws_session_is_orphaned(server._sessions["orphan-sid"]) is True
+        session = server._sessions.pop("orphan-sid")
+        server._teardown_session(session)
+        assert closed["worker"] is True
+    finally:
+        server._sessions.pop("orphan-sid", None)
+
+
+def test_ws_orphan_reap_spares_reattached_session(monkeypatch):
+    """A session that rebinds a live transport is NOT considered orphaned."""
+
+    class _LiveTransport:
+        def write(self, *a, **k):
+            return True
+
+    # Reattached: transport is a live (non-stdio) transport.
+    reattached = _session(transport=_LiveTransport(), running=False)
+    assert server._ws_session_is_orphaned(reattached) is False
+
+    # Mid-turn sessions are also spared even if detached.
+    mid_turn = _session(transport=server._stdio_transport, running=True)
+    assert server._ws_session_is_orphaned(mid_turn) is False
+
+    # Already finalized sessions are spared (idempotency).
+    done = _session(transport=server._stdio_transport, running=False, _finalized=True)
+    assert server._ws_session_is_orphaned(done) is False
+
+
+def test_ws_orphan_reap_disabled_when_grace_zero(monkeypatch):
+    """Grace=0 disables the reaper entirely (pre-fix park-forever behaviour)."""
+    fired = {"timer": False}
+
+    class _Timer:
+        def __init__(self, *a, **k):
+            fired["timer"] = True
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0.0)
+    monkeypatch.setattr(server.threading, "Timer", _Timer)
+    server._schedule_ws_orphan_reap("any-sid")
+    assert fired["timer"] is False
+
+
 def test_init_session_fires_reset_hook(monkeypatch):
     hooks = []
 
@@ -3510,7 +3577,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     release_build = threading.Event()
     build_entered = threading.Event()
 
-    def _slow_make_agent(sid, key, session_id=None):
+    def _slow_make_agent(sid, key, session_id=None, session_db=None):
         build_started.set()
         build_entered.set()
         release_build.wait(timeout=3.0)
@@ -3618,7 +3685,7 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
             self.base_url = ""
             self.api_key = ""
 
-    monkeypatch.setattr(server, "_make_agent", lambda sid, key: _FakeAgent())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_db=None: _FakeAgent())
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
     monkeypatch.setattr(
         server,
@@ -3702,7 +3769,7 @@ def test_session_create_continues_when_state_db_is_unavailable(monkeypatch):
 
     emits = []
 
-    monkeypatch.setattr(server, "_make_agent", lambda sid, key: _FakeAgent())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_db=None: _FakeAgent())
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_session_info", lambda _a, *a2: {"model": "x"})
