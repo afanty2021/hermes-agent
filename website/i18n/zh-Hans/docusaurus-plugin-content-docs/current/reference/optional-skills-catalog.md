@@ -58,6 +58,12 @@ hermes skills uninstall <skill-name>
 | [**kanban-video-orchestrator**](/user-guide/skills/optional/creative/creative-kanban-video-orchestrator) | 规划、搭建并监控由 Hermes Kanban 支撑的多 agent 视频制作流水线。适用于用户希望制作任何类型视频的场景 — 叙事影片、产品/营销视频、MV、解说视频、ASCII/终端艺术、抽象/生成式循环等。 |
 | [**meme-generation**](/user-guide/skills/optional/creative/creative-meme-generation) | 通过选取模板并使用 Pillow 叠加文字来生成真实的 meme 图片，输出实际的 .png 文件。 |
 
+## data-science
+
+| 技能 | 描述 |
+|-------|-------------|
+| [**jupyter-notebook**](/user-guide/skills/optional/data-science/data-science-jupyter-notebook) | 通过实时 Jupyter kernel（hamelnb）进行迭代式 Python 开发。 |
+
 ## devops
 
 | 技能 | 描述 |
@@ -152,7 +158,7 @@ hermes skills uninstall <skill-name>
 | [**canvas**](/user-guide/skills/optional/productivity/productivity-canvas) | Canvas LMS 集成 — 使用 API token 认证获取已注册课程和作业。 |
 | [**here.now**](/user-guide/skills/optional/productivity/productivity-here-now) | 将静态站点发布至 &#123;slug&#125;.here.now，并将私有文件存储在云端 Drive 中以供 agent 间交接。 |
 | [**memento-flashcards**](/user-guide/skills/optional/productivity/productivity-memento-flashcards) | 间隔重复闪卡系统。从事实或文本创建卡片，通过 agent 评分的自由文本回答与闪卡对话，从 YouTube 字幕生成测验，使用自适应调度复习到期卡片，并支持导出/导入。 |
-| [**shop-app**](/user-guide/skills/optional/productivity/productivity-shop-app) | Shop.app：商品搜索、订单追踪、退货、重新下单。 |
+| [**shop**](/user-guide/skills/optional/productivity/productivity-shop) | Shop.app：商品搜索、订单追踪、退货、重新下单。 |
 | [**shopify**](/user-guide/skills/optional/productivity/productivity-shopify) | 通过 curl 使用 Shopify Admin 和 Storefront GraphQL API。支持商品、订单、客户、库存、元字段。 |
 | [**siyuan**](/user-guide/skills/optional/productivity/productivity-siyuan) | 通过 curl 使用 SiYuan Note API，在自托管知识库中搜索、读取、创建和管理块与文档。 |
 | [**telephony**](/user-guide/skills/optional/productivity/productivity-telephony) | 为 Hermes 添加电话能力，无需修改核心工具。配置并持久化 Twilio 号码，发送和接收 SMS/MMS，拨打直接通话，并通过 Bland.ai 或 Vapi 发起 AI 驱动的外呼。 |
