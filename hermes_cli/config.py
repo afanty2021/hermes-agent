@@ -1144,6 +1144,13 @@ DEFAULT_CONFIG = {
         "modal_mode": "auto",
         "cwd": ".",  # Use current directory
         "timeout": 180,
+        # Adaptive idle timeout (seconds). The terminal keeps running as
+        # long as a command produces output; if it goes silent for this
+        # many seconds, the idle timeout fires even before ``timeout``
+        # is reached. Set to 0 (or negative) to disable and fall back to
+        # the hard ``timeout`` alone. Defaults to 60 when omitted. See
+        # tools/environments/base.py for the detection loop.
+        "idle_timeout": 60,
         # Bounded grace period (seconds) between SIGTERM and an escalated
         # SIGKILL when terminating a host process tree (browser daemons, etc.).
         # A daemon that stalls in its SIGTERM handler is force-killed after this
