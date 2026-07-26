@@ -111,6 +111,7 @@ import type { WiringActions, WiringApi } from './types'
 const AgentsView = lazy(async () => ({ default: (await import('../agents')).AgentsView }))
 const CommandCenterView = lazy(async () => ({ default: (await import('../command-center')).CommandCenterView }))
 const CronView = lazy(async () => ({ default: (await import('../cron')).CronView }))
+const WebhooksView = lazy(async () => ({ default: (await import('../webhooks')).WebhooksView }))
 const ProfilesView = lazy(async () => ({ default: (await import('../profiles')).ProfilesView }))
 const SettingsView = lazy(async () => ({ default: (await import('../settings')).SettingsView }))
 const StarmapView = lazy(async () => ({ default: (await import('../starmap')).StarmapView }))
@@ -141,6 +142,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const billingSettingsRequest = useStore($billingSettingsRequest)
   const currentCwd = useStore($currentCwd)
 
+  // eslint-disable-next-line no-restricted-syntax -- one-shot request-seen sentinel, not an atom mirror
   useEffect(() => {
     if (billingSettingsRequest === billingSettingsSeenRef.current) {
       return
@@ -197,7 +199,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     resetOverlayReturnRoute,
     settingsOpen,
     starmapOpen,
-    toggleCommandCenter
+    toggleCommandCenter,
+    webhooksOpen
   } = useOverlayRouting()
 
   const {
@@ -248,7 +251,6 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   )
 
   const { refreshProjectBranch } = useCwdActions({
-    activeSessionId,
     activeSessionIdRef,
     onSessionRuntimeInfo: updateActiveSessionRuntimeInfo,
     requestGateway
@@ -449,6 +451,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const freshSessionRequest = useStore($freshSessionRequest)
   const lastFreshRef = useRef(freshSessionRequest)
 
+  // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
     if (freshSessionRequest === lastFreshRef.current) {
       return
@@ -463,6 +466,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   // invalidateQueries on swap doesn't touch them).
   const lastGatewayProfileRef = useRef(activeGatewayProfile)
 
+  // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
     if (activeGatewayProfile === lastGatewayProfileRef.current) {
       return
@@ -499,6 +503,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const startWorkSessionRequest = useStore($startWorkSessionRequest)
   const lastStartWorkTokenRef = useRef(startWorkSessionRequest?.token ?? 0)
 
+  // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
     if (!startWorkSessionRequest || startWorkSessionRequest.token === lastStartWorkTokenRef.current) {
       return
@@ -1003,6 +1008,12 @@ export function ContribWiring({ children }: { children: ReactNode }) {
             onClose={closeOverlayToPreviousRoute}
             onOpenSession={sessionId => navigate(sessionRoute(sessionId))}
           />
+        </Suspense>
+      )}
+
+      {webhooksOpen && (
+        <Suspense fallback={null}>
+          <WebhooksView onClose={closeOverlayToPreviousRoute} />
         </Suspense>
       )}
 
