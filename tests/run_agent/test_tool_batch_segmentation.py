@@ -116,6 +116,19 @@ class TestPlanToolBatchSegments:
         assert _kinds(segments) == ["parallel", "sequential"]
         assert [tc.id for tc in segments[1][1]] == ["c1"]
 
+    def test_computer_use_is_a_barrier(self):
+        # Regression: computer_use controls a real desktop and must not race
+        # with other tools in the same segment. Lost during an upstream
+        # refactor that moved _NEVER_PARALLEL_TOOLS to tool_dispatch_helpers.
+        calls = [
+            _tc("web_search", call_id="r1"),
+            _tc("web_search", call_id="r2"),
+            _tc("computer_use", '{"action":"screenshot"}', call_id="cu1"),
+        ]
+        segments = _plan_tool_batch_segments(calls)
+        assert _kinds(segments) == ["parallel", "sequential"]
+        assert [tc.id for tc in segments[1][1]] == ["cu1"]
+
     def test_malformed_args_call_is_a_barrier_not_a_batch_poison(self):
         calls = [
             _tc("web_search", call_id="r1"),
