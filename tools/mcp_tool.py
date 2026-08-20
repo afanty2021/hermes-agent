@@ -116,6 +116,7 @@ from datetime import datetime
 from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
+from gateway.session_context import get_session_env
 from tools.registry import tool_error
 from tools.ansi_strip import strip_unicode_tags
 
@@ -5096,6 +5097,22 @@ def _wrap_with_dashboard_oauth_flow(coro):
     return _scoped()
 
 
+# Session identity stamped onto every MCP tools/call request as ``_meta``
+# (per-conversation identity binding for channel platforms like wecom).
+# Maps meta field name -> gateway session-context variable name, resolved
+# via gateway.session_context.get_session_env(). Unset entries are omitted
+# (cron turns intentionally carry an empty meta — the scheduler clears the
+# session vars).
+_SESSION_META_VARS = {
+    "hermes_platform": "HERMES_SESSION_PLATFORM",
+    "hermes_user_id": "HERMES_SESSION_USER_ID",
+    "hermes_user_name": "HERMES_SESSION_USER_NAME",
+    "hermes_chat_id": "HERMES_SESSION_CHAT_ID",
+    "hermes_session_key": "HERMES_SESSION_KEY",
+    "hermes_profile": "HERMES_SESSION_PROFILE",
+}
+
+
 def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
     """Schedule a coroutine on the MCP event loop and block until done.
 
@@ -5619,6 +5636,19 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     )
                 return tool_error(f"MCP server '{server_name}' is not connected")
 
+        # Capture the session identity HERE, in the agent thread. _call() is
+        # scheduled onto the MCP loop via run_coroutine_threadsafe, and tasks
+        # created inside the loop thread copy the loop thread's context — NOT
+        # this thread's contextvars (the same reason _run_on_mcp_loop needs
+        # _wrap_with_home_override). Reading get_session_env() inside _call()
+        # would miss the gateway-bound session vars and fall back to
+        # os.environ, which gateway turns never populate. A plain local
+        # captured by the _call() closure carries the *value*, which is safe
+        # across threads.
+        session_meta = {
+            k: v for k, n in _SESSION_META_VARS.items() if (v := get_session_env(n))
+        }
+
         async def _call():
             _mark_server_call_started(server)
             async with server._rpc_lock:
@@ -5628,7 +5658,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 # it and detect the gateway platform / session for routing.
                 server._pending_call_context = contextvars.copy_context()
                 try:
-                    result = await server.session.call_tool(tool_name, arguments=args)
+                    result = await server.session.call_tool(tool_name, arguments=args, meta=session_meta or None)
                 finally:
                     server._pending_call_context = None
             # The RPC round-trip completed — the session is demonstrably
