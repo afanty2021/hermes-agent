@@ -572,7 +572,11 @@ class TestToolHandler:
             with self._patch_mcp_loop():
                 result = json.loads(handler({"name": "world"}))
             assert result["result"] == "hello world"
-            mock_session.call_tool.assert_called_once_with("greet", arguments={"name": "world"})
+            # No session bound in this context → empty session meta → meta=None
+            # (the strict ContextVar-only reader never falls back to os.environ).
+            mock_session.call_tool.assert_called_once_with(
+                "greet", arguments={"name": "world"}, meta=None
+            )
         finally:
             _servers.pop("test_srv", None)
 
@@ -603,7 +607,9 @@ class TestToolHandler:
                 result = json.loads(handler({"name": "world"}))
             assert result["result"] == "reconnected"
             reconnect.assert_called_once()
-            mock_session.call_tool.assert_called_once_with("greet", arguments={"name": "world"})
+            mock_session.call_tool.assert_called_once_with(
+                "greet", arguments={"name": "world"}, meta=None
+            )
         finally:
             _servers.pop("test_srv", None)
 
@@ -2921,3 +2927,67 @@ class TestRedirectHeaderStripper:
         asyncio.run(hook(response))
         assert next_request.headers["authorization"] == "Bearer x"
         assert next_request.headers["x-tenant"] == "t"
+
+
+# ---------------------------------------------------------------------------
+# Session identity _meta (tools/call) — strict, ContextVar-only resolution
+# ---------------------------------------------------------------------------
+
+
+class TestSessionMetaIdentity:
+    """The tools/call ``_meta`` stamp must come from session ContextVars only.
+
+    A stray ``HERMES_SESSION_*`` exported into the gateway process's
+    environment (debug leftover, launchd injection) must never be able to
+    forge a platform/user identity on an outbound MCP call.
+    """
+
+    def test_bound_session_vars_stamped(self, monkeypatch):
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.mcp_tool import _build_session_meta
+
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "forged-from-env")
+        tokens = set_session_vars(
+            platform="telegram",
+            user_id="123456",
+            user_name="alice",
+            chat_id="-1001",
+            session_key="agent:main:telegram:dm:1",
+            profile="main",
+        )
+        try:
+            assert _build_session_meta() == {
+                "hermes_platform": "telegram",
+                "hermes_user_id": "123456",
+                "hermes_user_name": "alice",
+                "hermes_chat_id": "-1001",
+                "hermes_session_key": "agent:main:telegram:dm:1",
+                "hermes_profile": "main",
+            }
+        finally:
+            clear_session_vars(tokens)
+
+    def test_env_only_identity_never_stamped(self, monkeypatch):
+        """Exported HERMES_SESSION_* with no session bound → empty meta."""
+        from gateway.session_context import reset_session_vars
+        from tools.mcp_tool import _build_session_meta, _SESSION_META_VARS
+
+        reset_session_vars()
+        for env_name in _SESSION_META_VARS.values():
+            monkeypatch.setenv(env_name, "forged-from-env")
+        assert _build_session_meta() == {}
+
+    def test_cleared_session_yields_empty_meta(self, monkeypatch):
+        """Cleared ("") session vars are dropped — cron/turn-exit keeps meta empty."""
+        from gateway.session_context import (
+            clear_session_vars,
+            reset_session_vars,
+            set_session_vars,
+        )
+        from tools.mcp_tool import _build_session_meta
+
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "forged-from-env")
+        reset_session_vars()
+        tokens = set_session_vars(platform="telegram", user_id="123456")
+        clear_session_vars(tokens)
+        assert _build_session_meta() == {}

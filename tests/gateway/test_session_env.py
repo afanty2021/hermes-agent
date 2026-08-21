@@ -8,6 +8,7 @@ from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 from gateway.session_context import (
     get_session_env,
+    get_session_env_strict,
     set_session_vars,
     clear_session_vars,
     reset_session_vars,
@@ -273,3 +274,58 @@ def test_cron_session_set_clear_and_reset_tristate(monkeypatch):
     reset_session_vars()
     assert get_session_env("HERMES_CRON_SESSION") == "1"
 
+
+# ---------------------------------------------------------------------------
+# get_session_env_strict — identity consumers, NO os.environ fallback
+# ---------------------------------------------------------------------------
+
+
+def test_get_session_env_strict_reads_bound_contextvar(monkeypatch):
+    """strict reader returns the ContextVar-bound session values."""
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "forged-from-env")
+
+    tokens = set_session_vars(platform="telegram", user_id="123456")
+    try:
+        assert get_session_env_strict("HERMES_SESSION_PLATFORM") == "telegram"
+        assert get_session_env_strict("HERMES_SESSION_USER_ID") == "123456"
+    finally:
+        clear_session_vars(tokens)
+
+
+def test_get_session_env_strict_never_falls_back_to_os_environ(monkeypatch):
+    """_UNSET (or unknown name) yields default even when os.environ has the var.
+
+    The environ fallback in get_session_env is a compat channel for CLI/cron/
+    test processes. Identity/security-sensitive consumers must not honor it:
+    a manually exported HERMES_SESSION_* in a long-lived host process (debug
+    leftover, launchd injection) would otherwise forge a session identity.
+    """
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "forged-from-env")
+
+    # Contextvar holds _UNSET → default, NOT the exported env value.
+    assert get_session_env_strict("HERMES_SESSION_PLATFORM") == ""
+    assert get_session_env_strict("HERMES_SESSION_PLATFORM", "fallback") == "fallback"
+
+    # Unknown names never resolve through os.environ either.
+    monkeypatch.setenv("HERMES_SESSION_NOT_A_VAR", "x")
+    assert get_session_env_strict("HERMES_SESSION_NOT_A_VAR") == ""
+
+    # Contrast: the non-strict reader DOES see the env value (documented
+    # behavior for CLI/cron/test processes).
+    assert get_session_env("HERMES_SESSION_PLATFORM") == "forged-from-env"
+
+
+def test_get_session_env_strict_clear_yields_empty_string(monkeypatch):
+    """After clear_session_vars, "" survives the strict reader — T1 truthiness filter.
+
+    clear_session_vars sets vars to "" (explicitly cleared), and "" is falsy,
+    so a session-meta dict comprehension drops the entry entirely. The strict
+    reader must preserve that semantics rather than re-resolving through env.
+    """
+    monkeypatch.setenv("HERMES_SESSION_USER_ID", "forged-from-env")
+
+    tokens = set_session_vars(platform="telegram", user_id="123456")
+    clear_session_vars(tokens)
+
+    assert get_session_env_strict("HERMES_SESSION_USER_ID") == ""
+    assert get_session_env_strict("HERMES_SESSION_PLATFORM") == ""

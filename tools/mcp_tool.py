@@ -116,7 +116,7 @@ from datetime import datetime
 from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from gateway.session_context import get_session_env
+from gateway.session_context import get_session_env_strict
 from tools.registry import tool_error
 from tools.ansi_strip import strip_unicode_tags
 
@@ -5100,9 +5100,11 @@ def _wrap_with_dashboard_oauth_flow(coro):
 # Session identity stamped onto every MCP tools/call request as ``_meta``
 # (per-conversation identity binding for channel platforms like wecom).
 # Maps meta field name -> gateway session-context variable name, resolved
-# via gateway.session_context.get_session_env(). Unset entries are omitted
-# (cron turns intentionally carry an empty meta — the scheduler clears the
-# session vars).
+# via gateway.session_context.get_session_env_strict() — the ContextVar-only
+# reader with NO os.environ fallback, so a stray HERMES_SESSION_* exported
+# into the gateway process cannot forge an identity. Unset entries are
+# omitted (cron turns intentionally carry an empty meta — the scheduler
+# clears the session vars).
 _SESSION_META_VARS = {
     "hermes_platform": "HERMES_SESSION_PLATFORM",
     "hermes_user_id": "HERMES_SESSION_USER_ID",
@@ -5111,6 +5113,21 @@ _SESSION_META_VARS = {
     "hermes_session_key": "HERMES_SESSION_KEY",
     "hermes_profile": "HERMES_SESSION_PROFILE",
 }
+
+
+def _build_session_meta() -> dict:
+    """Snapshot the session identity for a tools/call ``_meta`` payload.
+
+    Reads every ``_SESSION_META_VARS`` entry through
+    :func:`gateway.session_context.get_session_env_strict`: identity
+    metadata must reflect only what the gateway bound for THIS session
+    (ContextVar), never a process-environment ``HERMES_SESSION_*`` value.
+    Falsy values are dropped so a cleared/cron context yields ``{}`` and
+    the caller can pass ``meta=None`` instead of an empty identity object.
+    """
+    return {
+        k: v for k, n in _SESSION_META_VARS.items() if (v := get_session_env_strict(n))
+    }
 
 
 def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
@@ -5640,14 +5657,10 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         # scheduled onto the MCP loop via run_coroutine_threadsafe, and tasks
         # created inside the loop thread copy the loop thread's context — NOT
         # this thread's contextvars (the same reason _run_on_mcp_loop needs
-        # _wrap_with_home_override). Reading get_session_env() inside _call()
-        # would miss the gateway-bound session vars and fall back to
-        # os.environ, which gateway turns never populate. A plain local
-        # captured by the _call() closure carries the *value*, which is safe
-        # across threads.
-        session_meta = {
-            k: v for k, n in _SESSION_META_VARS.items() if (v := get_session_env(n))
-        }
+        # _wrap_with_home_override). Reading the session vars inside _call()
+        # would miss the gateway-bound values. A plain local captured by the
+        # _call() closure carries the *value*, which is safe across threads.
+        session_meta = _build_session_meta()
 
         async def _call():
             _mark_server_call_started(server)

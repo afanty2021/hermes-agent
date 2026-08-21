@@ -402,6 +402,35 @@ def get_session_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def get_session_env_strict(name: str, default: str = "") -> str:
+    """Read a session context variable with **no** ``os.environ`` fallback.
+
+    Unlike :func:`get_session_env` — whose ``os.environ`` fallback is a
+    compatibility channel for CLI / cron / test processes that legitimately
+    pass session state through the environment — this helper resolves the
+    ContextVar binding only:
+
+    1. Context variable (set by ``set_session_vars`` / the gateway).  A value
+       set — even to ``""`` — is returned as-is.
+    2. *default* — when the variable holds ``_UNSET`` (never bound in this
+       context) or the name is not in ``_VAR_MAP``.
+
+    Use this for **identity / security-sensitive consumers**: anything that
+    attributes an action to a chat user or stamps a session identity onto an
+    outbound request (e.g. the MCP ``tools/call`` ``_meta`` session stamp in
+    ``tools/mcp_tool.py``).  A stray ``HERMES_SESSION_*`` exported into a
+    long-lived host process's environment — a debug leftover, launchd
+    environment injection — must never be able to forge a session identity;
+    identity comes only from the session's ContextVar binding.
+    """
+    var = _VAR_MAP.get(name)
+    if var is not None:
+        value = var.get()
+        if value is not _UNSET:
+            return value
+    return default
+
+
 # Surfaces that are not a human chat channel. The gateway binds a platform
 # value (``telegram``) to HERMES_SESSION_PLATFORM, while the CLI, TUI, and
 # desktop bind HERMES_SESSION_SOURCE (``cli``, ``tui``, ``desktop``) and leave
