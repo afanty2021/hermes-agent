@@ -162,3 +162,29 @@ zai = ZaiProfile(
 )
 
 register_provider(zai)
+
+
+# ── fork 追加：zai-coding-cn（国内 Coding Plan 端点）─────────────────────────
+# 注册为独立 profile 使 ``hermes model zai-coding-cn`` 的 dispatch catch-all
+# （main.py ``_is_profile_api_key_provider``）命中 api_key 流程——此前该名字
+# 仅存在于 auth.PROVIDER_REGISTRY/hermes_cli.providers overlay，交互切换会
+# 静默落空（评审发现 B；同型先例：computer_use never-parallel 曾被上游 set
+# 重构 merge 静默吞掉）。凭证/端点探测仍走 auth.ZAI_ENDPOINTS（coding-cn
+# 优先），此处只补 profile 面。子类化 ZaiProfile 继承 thinking 开关与
+# GLM-5.2/5.3 reasoning_effort 适配（live glm-5.2 依赖 thinking disabled）。
+zai_coding_cn = ZaiProfile(
+    name="zai-coding-cn",
+    aliases=(),
+    env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
+    display_name="Z.AI (GLM · Coding Plan CN)",
+    description="BigModel 国内 Coding Plan 端点（open.bigmodel.cn/api/coding）",
+    signup_url="https://open.bigmodel.cn/",
+    fallback_models=(
+        "glm-5.2",
+        "glm-5.1",
+    ),
+    base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+    default_aux_model="glm-4.5-flash",
+)
+
+register_provider(zai_coding_cn)
