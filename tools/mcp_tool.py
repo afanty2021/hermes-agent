@@ -4464,6 +4464,32 @@ def _bump_server_error(server_name: str) -> None:
         _server_breaker_opened_at[server_name] = time.monotonic()
 
 
+def _is_application_level_mcp_error(exc: BaseException) -> bool:
+    """True when ``exc`` is a protocol-level MCP error *response* (McpError).
+
+    An McpError raised out of ``session.call_tool`` means the server received
+    the request and answered with a JSON-RPC error — e.g. -32602 invalid
+    params from an argument/identity guard. That round-trip is proof of
+    reachability: the circuit breaker exists for dead transports, so these
+    must NOT burn a strike (incident 2026-08-24: four identity-lock refusals
+    at -32602 tripped the breaker and the model told the user the MCP server
+    was "unreachable / still recovering" while searches were succeeding).
+    Transport failures (connect refused, timeout, protocol parse) keep
+    bumping as before.
+    """
+    try:
+        from mcp.shared.exceptions import McpError
+    except ImportError:  # pragma: no cover — very old SDK layouts
+        try:
+            from mcp.types import McpError  # type: ignore[assignment]
+        except ImportError:
+            return False
+    if not isinstance(exc, McpError):
+        return False
+    code = getattr(getattr(exc, "error", None), "code", None)
+    return isinstance(code, int)
+
+
 def _reset_server_error(server_name: str) -> None:
     """Fully close the breaker for ``server_name``.
 
@@ -6012,7 +6038,12 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             try:
                 parsed = json.loads(result)
                 if "error" in parsed:
-                    _bump_server_error(server_name)
+                    # isError result = the RPC round-trip completed and the
+                    # server answered (app-level error, e.g. bad args /
+                    # not found / permission refused). Reachability is
+                    # proven — reset, don't burn, the breaker (#10447 is
+                    # about dead transports).
+                    _reset_server_error(server_name)
                 else:
                     _reset_server_error(server_name)  # success — reset
             except (json.JSONDecodeError, TypeError):
@@ -6041,7 +6072,13 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
 
-            _bump_server_error(server_name)
+            if _is_application_level_mcp_error(exc):
+                # Server answered with a JSON-RPC error (e.g. -32602 from an
+                # argument/identity guard) — demonstrably reachable. Reset
+                # (don't burn) the breaker; it exists for dead transports.
+                _reset_server_error(server_name)
+            else:
+                _bump_server_error(server_name)
             logger.error(
                 "MCP tool %s/%s call failed: %s",
                 server_name, tool_name, exc,
