@@ -125,3 +125,58 @@ def test_transport_failures_still_trip_the_breaker(monkeypatch):
     blocked = handler({})
     assert "unreachable after" in blocked
     assert "consecutive" in blocked
+
+
+SYNTHETIC_408 = McpError(ErrorData(
+    code=408,
+    message="Timed out while waiting for response to CallToolRequest. "
+            "Waited 30.0 seconds.",
+))
+
+
+def test_synthetic_timeout_408_still_bumps():
+    """SDK landmine (mcp 1.26.0): with read_timeout_seconds configured the
+    CLIENT converts its own TimeoutError into McpError(408) — no server
+    response involved. A hung server must keep burning strikes (and trip),
+    exactly like a refused one."""
+    assert not mcp_tool._is_application_level_mcp_error(SYNTHETIC_408)
+
+
+def test_hung_server_via_408_trips_the_breaker(monkeypatch):
+    handler = _install(monkeypatch, SYNTHETIC_408)
+    for _ in range(mcp_tool._CIRCUIT_BREAKER_THRESHOLD):
+        handler({})
+    assert mcp_tool._server_error_counts[SERVER] == mcp_tool._CIRCUIT_BREAKER_THRESHOLD
+    assert "unreachable after" in handler({})
+
+
+def test_app_level_error_resets_prior_transport_strikes(monkeypatch):
+    """Mixed scenario pins the reset-to-zero semantics: 2 real transport
+    failures, then one answered -32602 (identity refusal) proves the server
+    is alive and fully closes the breaker — the next 2 transport failures
+    alone must NOT trip it (would have if strikes were merely preserved).
+    (_install patches module-level globals, so each phase swaps the fake
+    server; earlier handlers stay valid — they resolve globals at call
+    time.)"""
+    def transport():
+        return _install(monkeypatch, ConnectionError("refused"))
+
+    def refusal():
+        return _install(monkeypatch, IDENTITY_REFUSAL)
+
+    transport()({})
+    transport()({})
+    assert mcp_tool._server_error_counts[SERVER] == 2
+
+    refusal()({})
+    assert mcp_tool._server_error_counts.get(SERVER, 0) == 0, (
+        "an answered JSON-RPC error must reset the consecutive-failure count"
+    )
+
+    transport()({})
+    transport()({})
+    assert mcp_tool._server_error_counts[SERVER] == 2, (
+        "after reset, 2 strikes alone must not reach the threshold of "
+        f"{mcp_tool._CIRCUIT_BREAKER_THRESHOLD}"
+    )
+    assert "unreachable after" not in refusal()({})

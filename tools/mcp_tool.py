@@ -4487,7 +4487,16 @@ def _is_application_level_mcp_error(exc: BaseException) -> bool:
     if not isinstance(exc, McpError):
         return False
     code = getattr(getattr(exc, "error", None), "code", None)
-    return isinstance(code, int)
+    if not isinstance(code, int):
+        return False
+    # 408 is the one code the CLIENT can synthesize locally: with
+    # read_timeout_seconds configured, the SDK converts its own TimeoutError
+    # into McpError(ErrorData(code=408)) — no server response involved
+    # (mcp 1.26.0 shared/session.py). Counting it as "answered" would
+    # permanently disable the breaker for hung servers (a more common death
+    # than refused connections). Every other code arrives via a real
+    # JSON-RPC error response from the server.
+    return code != 408
 
 
 def _reset_server_error(server_name: str) -> None:
