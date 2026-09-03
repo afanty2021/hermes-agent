@@ -5344,6 +5344,7 @@ _SESSION_META_VARS = {
     "hermes_user_id": "HERMES_SESSION_USER_ID",
     "hermes_user_name": "HERMES_SESSION_USER_NAME",
     "hermes_chat_id": "HERMES_SESSION_CHAT_ID",
+    "hermes_message_id": "HERMES_SESSION_MESSAGE_ID",
     "hermes_session_key": "HERMES_SESSION_KEY",
     "hermes_profile": "HERMES_SESSION_PROFILE",
 }

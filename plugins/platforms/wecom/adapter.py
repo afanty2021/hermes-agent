@@ -179,6 +179,7 @@ class WeComAdapter(BasePlatformAdapter):
         extra = config.extra or {}
         self._bot_id = str(extra.get("bot_id") or os.getenv("WECOM_BOT_ID", "")).strip()
         self._secret = str(extra.get("secret") or _get_scoped_secret("WECOM_SECRET", "")).strip()
+        self._inbound_max_bytes = int(extra.get("inbound_max_bytes") or ABSOLUTE_MAX_BYTES)
         self._ws_url = str(
             extra.get("websocket_url")
             or extra.get("websocketUrl")
@@ -574,6 +575,7 @@ class WeComAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             chat_type="group" if is_group else "dm",
             user_id=sender_id or None,
+            message_id=msg_id,
             user_name=sender_id or None,
         )
 
@@ -795,7 +797,7 @@ class WeComAdapter(BasePlatformAdapter):
                     logger.warning("[%s] Rejected non-image bytes: %s", self.name, exc)
                     return None
 
-            filename = str(media.get("filename") or media.get("name") or "wecom_file")
+            filename = unquote(str(media.get("filename") or media.get("name") or "wecom_file"))
             return cache_document_from_bytes(raw, filename), mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
         # Check for sdkfileid (会话存档格式，不是智能机器人标准格式)
@@ -823,7 +825,7 @@ class WeComAdapter(BasePlatformAdapter):
             return None
 
         try:
-            raw, headers = await self._download_remote_bytes(url, max_bytes=ABSOLUTE_MAX_BYTES)
+            raw, headers = await self._download_remote_bytes(url, max_bytes=self._inbound_max_bytes)
         except Exception as exc:
             logger.debug("[%s] Failed to download %s from %s: %s", self.name, kind, url, exc)
             return None
@@ -884,9 +886,9 @@ class WeComAdapter(BasePlatformAdapter):
         if content_disposition:
             match = re.search(r'filename="?([^";]+)"?', content_disposition)
             if match:
-                return match.group(1)
+                return unquote(match.group(1))
 
-        name = Path(urlparse(url).path).name or "document"
+        name = Path(unquote(urlparse(url).path)).name or "document"
         if "." not in name:
             ext = mimetypes.guess_extension(content_type) or ".bin"
             name = f"{name}{ext}"
@@ -1208,7 +1210,7 @@ class WeComAdapter(BasePlatformAdapter):
 
         parsed = urlparse(source)
         if parsed.scheme in {"http", "https"}:
-            data, headers = await self._download_remote_bytes(source, max_bytes=ABSOLUTE_MAX_BYTES)
+            data, headers = await self._download_remote_bytes(source, max_bytes=self._inbound_max_bytes)
             content_disposition = headers.get("content-disposition")
             resolved_name = file_name or self._guess_filename(source, content_disposition, headers.get("content-type", ""))
             content_type = self._normalize_content_type(headers.get("content-type", ""), resolved_name)
