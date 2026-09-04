@@ -2735,6 +2735,22 @@ async def _discover_gateway_mcp_tools(config: object) -> None:
             logger.warning(
                 "MCP tool discovery failed for profile '%s'", profile_name, exc_info=True,
             )
+    # zops fork patch 0006（2026-09-04）：MCP 工具注册发生在进程级 MCP loop 线程，
+    # 该线程的 scope contextvar 恒为主目录——ee0e234a2c 只修了 discovery 调用侧，
+    # 注册侧仍把 profile 的 MCP 工具落进主目录 scope 桶，profile 回合
+    # （_merged_tools = global + own scope）查不到自己的 MCP 工具。此处把所有
+    # mcp-* 条目提升为全局可见；profile 间隔离由 platform_toolsets 白名单承担
+    # （各 profile 已显式列 MCP server 名）。上游修复注册侧线程上下文后可撤。
+    try:
+        from tools.registry import registry as _patch_reg
+        with _patch_reg._lock:
+            for _bucket in list(_patch_reg._scoped_tools.values()):
+                for _name, _entry in list(_bucket.items()):
+                    if getattr(_entry, "toolset", "").startswith("mcp-"):
+                        _patch_reg._tools[_name] = _bucket.pop(_name)
+            _patch_reg._generation += 1
+    except Exception:
+        logger.warning("MCP scope lift (zops patch 0006) failed", exc_info=True)
 
 
 def _platform_has_bot_credential(platform: "Platform", platform_config: "PlatformConfig") -> bool:
