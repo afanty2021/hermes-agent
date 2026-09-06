@@ -8721,10 +8721,21 @@ def _resolve_task_provider_model(
 
     if task:
         task_config = _get_auxiliary_task_config(task)
-        cfg_provider = str(task_config.get("provider", "")).strip() or None
-        cfg_model = str(task_config.get("model", "")).strip() or None
-        cfg_base_url = str(task_config.get("base_url", "")).strip() or None
-        cfg_api_key = str(task_config.get("api_key", "")).strip() or None
+        # YAML "key: null" must read as UNSET: str(None) == "None" is truthy,
+        # so a null-valued key used to leak the literal string "None" into the
+        # resolution, where it overrode the auto-picked main model (live
+        # 2026-09-06: satellite vision turns sent model="None" → zai 400
+        # "1214 modelCode：不存在").
+        def _cfg_str(key: str) -> Optional[str]:
+            raw = task_config.get(key)
+            if raw is None:
+                return None
+            return str(raw).strip() or None
+
+        cfg_provider = _cfg_str("provider")
+        cfg_model = _cfg_str("model")
+        cfg_base_url = _cfg_str("base_url")
+        cfg_api_key = _cfg_str("api_key")
         # Resolve key_env → env var when api_key is not set directly
         if not cfg_api_key:
             cfg_key_env = str(
@@ -8732,7 +8743,7 @@ def _resolve_task_provider_model(
             ).strip()
             if cfg_key_env:
                 cfg_api_key = _scoped_key_env(cfg_key_env) or None
-        cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
+        cfg_api_mode = _cfg_str("api_mode")
 
     # 'auto' is a sentinel meaning "inherit from main runtime / auto-detect", not
     # a literal model id. Without this, a config of `auxiliary.<task>.model: auto`

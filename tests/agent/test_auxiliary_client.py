@@ -4865,3 +4865,43 @@ class TestFastModelTier:
             _FAST_MODEL_TASKS
         )
         assert not overlap
+
+
+class TestYamlNullTaskKeysReadAsUnset:
+    """`auxiliary.<task>.model: null` in YAML must read as UNSET (2026-09-06
+    live incident): str(None) == "None" is truthy, so the literal "None"
+    string overrode the auto-resolved main model on satellite vision turns
+    and zai rejected it with 400 "1214 modelCode：不存在"."""
+
+    def test_null_model_key_does_not_leak_literal_none_string(self):
+        task_config = {"provider": None, "model": None, "base_url": None, "api_key": None, "api_mode": None}
+        with patch(
+            "agent.auxiliary_client._get_auxiliary_task_config",
+            return_value=task_config,
+        ), patch(
+            "agent.auxiliary_client._read_main_provider", return_value="anthropic",
+        ), patch(
+            "agent.auxiliary_client._read_main_model", return_value="claude-test-vision",
+        ):
+            resolved_provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(
+                task="vision", provider=None, model=None,
+            )
+        for value in (resolved_provider, model, base_url, api_key, api_mode):
+            assert value != "None", "null-valued YAML key leaked the literal string 'None'"
+
+    def test_explicit_args_still_win_over_null_config_keys(self):
+        task_config = {"model": None, "base_url": None, "api_key": None}
+        with patch(
+            "agent.auxiliary_client._get_auxiliary_task_config",
+            return_value=task_config,
+        ):
+            resolved_provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(
+                task="vision",
+                provider="anthropic",
+                model="test-model",
+                base_url="https://provider.example/v1",
+                api_key="resolved-token",
+            )
+        assert model == "test-model"
+        assert base_url == "https://provider.example/v1"
+        assert api_key == "resolved-token"
