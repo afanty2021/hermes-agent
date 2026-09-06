@@ -1612,12 +1612,7 @@ class WeComAdapter(BasePlatformAdapter):
                 return None
 
             if kind == "image":
-                ext = self._detect_image_ext(raw)
-                try:
-                    return await cache_image_from_bytes_async(raw, ext), self._mime_for_ext(ext, fallback="image/jpeg")
-                except ValueError as exc:
-                    logger.warning("[%s] Rejected non-image bytes: %s", self.name, exc)
-                    return None
+                return await self._cache_inbound_image(raw, "image/jpeg", source="base64")
 
             filename = unquote(str(media.get("filename") or media.get("name") or "wecom_file"))
             return await cache_document_from_bytes_async(raw, filename), mimetypes.guess_type(filename)[0] or "application/octet-stream"
@@ -1667,15 +1662,46 @@ class WeComAdapter(BasePlatformAdapter):
             # which misclassifies the cached image as a binary document
             # downstream (_derive_message_type keys off the mime). The bytes'
             # magic is authoritative for images — same as the base64 branch.
-            ext = self._detect_image_ext(raw)
-            try:
-                return await cache_image_from_bytes_async(raw, ext), self._mime_for_ext(ext, fallback=content_type)
-            except ValueError as exc:
-                logger.warning("[%s] Rejected non-image bytes from %s: %s", self.name, url, exc)
-                return None
+            return await self._cache_inbound_image(raw, content_type, source=url)
 
         filename = self._guess_filename(url, headers.get("content-disposition"), content_type)
         return await cache_document_from_bytes_async(raw, filename), content_type
+
+    async def _cache_inbound_image(self, raw: bytes, fallback_mime: str, *, source: str) -> Optional[Tuple[str, str]]:
+        """入站图片统一入口（base64 与 url+aeskey 两分支共用）：魔数定 ext →
+        HEIC/HEIF 先转 JPEG → 落缓存并按 ext 推 mime。非图/坏字节走
+        ValueError 拒收通道（warning + None），绝不冒充可用图送下游。"""
+        try:
+            ext = self._detect_image_ext(raw)
+            if ext == ".heic":
+                raw = self._convert_heic_to_jpeg(raw)
+                ext = ".jpg"
+            return await cache_image_from_bytes_async(raw, ext), self._mime_for_ext(ext, fallback=fallback_mime)
+        except ValueError as exc:
+            logger.warning("[%s] Rejected non-image bytes from %s: %s", self.name, source, exc)
+            return None
+
+    @staticmethod
+    def _convert_heic_to_jpeg(data: bytes) -> bytes:
+        """iPhone HEIC（HEIF 容器）→ JPEG：_looks_like_image 魔数白名单与下游
+        视觉模型都不认 HEIF——转码后字节/扩展名/mime 全部落回既有 JPEG 路径
+        （此前 HEIC 在所有分支被静默拒收丢图，评审观察项 2026-09-06 立项）。
+        依赖 pillow-heif（懒加载；未安装 → ImportError → ValueError 拒收不崩）。
+        失败统一抛 ValueError，沿用「非图拒收」通道。"""
+        try:
+            from io import BytesIO
+
+            from PIL import Image, ImageOps
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()  # 幂等注册
+            with Image.open(BytesIO(data)) as img:
+                oriented = ImageOps.exif_transpose(img) or img  # iPhone 竖拍 EXIF 方向
+                out = BytesIO()
+                oriented.convert("RGB").save(out, format="JPEG", quality=90)
+                return out.getvalue()
+        except Exception as exc:
+            raise ValueError(f"HEIC decode/convert failed: {exc}") from exc
 
     @staticmethod
     def _decode_base64(data: str) -> bytes:
@@ -1692,6 +1718,15 @@ class WeComAdapter(BasePlatformAdapter):
             return ".gif"
         if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
             return ".webp"
+        # HEIF/HEIC 容器（ISO BMFF：bytes[4:8]==ftyp，major brand 8:12）。
+        # iPhone 相册默认格式；brand 集覆盖苹果静图（heic/heix/heim/heis/mif1）、
+        # 他牌 HEVC 容器（hevc/hevx/hevm/hevs/msf1）与裸 heif。AVIF 不在此列
+        # （需 pillow-avif-plugin，WeCom 实发未见——出现时另补）。
+        if data[4:8] == b"ftyp" and data[8:12] in {
+            b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx",
+            b"hevm", b"hevs", b"mif1", b"msf1", b"heif",
+        }:
+            return ".heic"
         return ".jpg"
 
     @staticmethod

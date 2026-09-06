@@ -1025,6 +1025,81 @@ class TestInboundImageClassification:
         assert captured["ext"] == ".png"
         assert (path, mime) == ("/cache/img_abc.png", "image/png")
 
+    def test_heic_ftyp_magic_detected(self):
+        """HEIF/HEIC ISO BMFF 魔数（ftyp + major brand）→ .heic；无关 ftyp
+        容器（如 M4A）不误伤，仍走 .jpg 缺省（由 _looks_like_image 兜底拒收）。"""
+        from plugins.platforms.wecom.adapter import WeComAdapter
+
+        heic = b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64
+        assert WeComAdapter._detect_image_ext(heic) == ".heic"
+        assert WeComAdapter._detect_image_ext(b"\x00\x00\x00\x18ftypM4A " + b"\x00" * 8) == ".jpg"
+
+    @pytest.mark.asyncio
+    async def test_heic_inbound_converted_to_jpeg(self, monkeypatch):
+        """iPhone HEIC 透传：ftyp 魔数识别 → Pillow(pillow-heif) 转 JPEG →
+        缓存字节/mime 全走既有 JPEG 路径（此前被 _looks_like_image 静默拒收，
+        模型侧表现为「没收到图」）。"""
+        pytest.importorskip("pillow_heif")
+        from io import BytesIO
+
+        from PIL import Image
+        from pillow_heif import register_heif_opener
+
+        from plugins.platforms.wecom import adapter as adapter_mod
+
+        register_heif_opener()
+        buf = BytesIO()
+        Image.new("RGB", (16, 12), (180, 40, 40)).save(buf, format="HEIF")
+        heic_bytes = buf.getvalue()
+        assert heic_bytes[8:12] == b"heic"  # 夹具确是 HEIF 容器
+
+        adapter = self._make_adapter()
+
+        async def fake_download(url, max_bytes=None):
+            return heic_bytes, {"content-type": "application/octet-stream"}
+
+        monkeypatch.setattr(adapter, "_download_remote_bytes", fake_download)
+
+        captured = {}
+
+        async def fake_cache(data, ext):
+            captured["ext"] = ext
+            captured["data"] = data
+            return "/cache/img_abc.jpg"
+
+        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+
+        path, mime = await adapter._cache_media(
+            "image", {"url": "https://wecom.cdn/media/get"}
+        )
+
+        assert captured["ext"] == ".jpg"
+        assert captured["data"].startswith(b"\xff\xd8\xff")  # 落缓存的是真 JPEG 明文
+        assert (path, mime) == ("/cache/img_abc.jpg", "image/jpeg")
+
+    @pytest.mark.asyncio
+    async def test_corrupt_heic_rejected_not_misclassified(self, monkeypatch):
+        """ftyp=heic 但解不开的坏字节：走 ValueError 拒收通道（warning+None），
+        既不冒充可用图、也不进缓存。"""
+        from plugins.platforms.wecom import adapter as adapter_mod
+
+        adapter = self._make_adapter()
+        corrupt = b"\x00\x00\x00\x18ftypheic" + b"\x9d" * 96
+
+        async def fake_download(url, max_bytes=None):
+            return corrupt, {"content-type": "application/octet-stream"}
+
+        monkeypatch.setattr(adapter, "_download_remote_bytes", fake_download)
+
+        async def must_not_cache(data, ext):
+            raise AssertionError("corrupt HEIC must not reach the cache")
+
+        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", must_not_cache)
+
+        assert await adapter._cache_media(
+            "image", {"url": "https://wecom.cdn/media/get"}
+        ) is None
+
 
 # === NATIVE STREAMING (msgtype: stream) ===
 
