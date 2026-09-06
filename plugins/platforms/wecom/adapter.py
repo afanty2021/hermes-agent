@@ -1696,17 +1696,18 @@ class WeComAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _mime_for_ext(ext: str, fallback: str = "application/octet-stream") -> str:
-        return mimetypes.types_map.get(ext.lower(), fallback)
-
-    @staticmethod
-    def _guess_extension(url: str, content_type: str, fallback: str) -> str:
-        ext = mimetypes.guess_extension(content_type) if content_type else None
-        if ext:
-            return ext
-        path_ext = Path(urlparse(url).path).suffix
-        if path_ext:
-            return path_ext
-        return fallback
+        # 硬编码表而非 mimetypes.types_map：types_map 在进程未 mimetypes.init()
+        # （且未调过任何 guess_*）时静态缺 .webp，直读会把 webp 图打回 fallback
+        # octet-stream → DOCUMENT 误判（评审 I1；旧码靠 guess_extension 内部必
+        # init 的副作用意外免疫，魔数优先重构拆掉了该隐性保险）。域 =
+        # _detect_image_ext 输出 ⊆ 此四项。
+        ext_mime = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }
+        return ext_mime.get(ext.lower(), fallback)
 
     @staticmethod
     def _guess_filename(url: str, content_disposition: Optional[str], content_type: str) -> str:

@@ -963,6 +963,68 @@ class TestInboundImageClassification:
         )
         assert (path, mime) == ("/cache/img_abc.png", "image/png")
 
+    def test_image_mime_table_without_mimetypes_init(self):
+        """mimetypes.types_map 静态缺 .webp，直到进程内发生 mimetypes.init()
+        或任一 guess_* 调用；_mime_for_ext 不得依赖该隐式初始化（评审 I1：
+        裸进程直读 types_map 会把 webp 打回 octet-stream → DOCUMENT 误判）。
+        主动从 types_map 摘走四项模拟未初始化形态，断言硬编码表独立成立。"""
+        import mimetypes
+
+        from plugins.platforms.wecom.adapter import WeComAdapter
+
+        removed = {}
+        for ext in (".png", ".jpg", ".gif", ".webp"):
+            if ext in mimetypes.types_map:
+                removed[ext] = mimetypes.types_map.pop(ext)
+        try:
+            assert WeComAdapter._mime_for_ext(".webp", fallback="application/octet-stream") == "image/webp"
+            assert WeComAdapter._mime_for_ext(".png") == "image/png"
+            assert WeComAdapter._mime_for_ext(".GIF", fallback="application/octet-stream") == "image/gif"
+        finally:
+            mimetypes.types_map.update(removed)
+        # 域外 ext 仍走 fallback
+        assert WeComAdapter._mime_for_ext(".tiff", fallback="application/octet-stream") == "application/octet-stream"
+
+    @pytest.mark.asyncio
+    async def test_aeskey_image_decrypts_before_magic_detection(self, monkeypatch):
+        """url+aeskey 入站图：AES-256-CBC 解密（key=base64(aeskey)、IV=key[:16]、
+        PKCS#7）必须先于魔数判定——ext/mime 源自解密后明文（评审 M2 顺序钉；
+        密文不以 PNG 魔数开头，若顺序颠倒 _detect_image_ext 会回落 .jpg 且
+        cache 收到的是密文，两重断言都会炸）。"""
+        import base64 as b64
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        from plugins.platforms.wecom import adapter as adapter_mod
+
+        adapter = self._make_adapter()
+        key = bytes(range(32))
+        plaintext = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        pad_len = 16 - len(plaintext) % 16
+        padded = plaintext + bytes([pad_len]) * pad_len
+        encryptor = Cipher(algorithms.AES(key), modes.CBC(key[:16])).encryptor()
+        ciphertext = encryptor.update(padded) + encryptor.finalize()
+
+        async def fake_download(url, max_bytes=None):
+            return ciphertext, {"content-type": "application/octet-stream"}
+
+        monkeypatch.setattr(adapter, "_download_remote_bytes", fake_download)
+
+        captured = {}
+
+        async def fake_cache(data, ext):
+            captured["ext"] = ext
+            assert data == plaintext, "cache must receive decrypted plaintext, not ciphertext"
+            return "/cache/img_abc.png"
+
+        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+
+        path, mime = await adapter._cache_media(
+            "image", {"url": "https://wecom.cdn/media/get", "aeskey": b64.b64encode(key).decode()}
+        )
+
+        assert captured["ext"] == ".png"
+        assert (path, mime) == ("/cache/img_abc.png", "image/png")
+
 
 # === NATIVE STREAMING (msgtype: stream) ===
 
