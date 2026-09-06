@@ -1121,3 +1121,119 @@ class TestVisionCpuBurstCap:
             f"analyses were serialized to the cap (peak={calls_peak}); only the "
             "encode burst should be bounded, not the whole call"
         )
+
+
+# ---------------------------------------------------------------------------
+# Proactive aux-LLM resize gate (2026-09-06): full-resolution-first was the
+# 120 s-timeout root cause for mid-size compressed JPEGs (WeCom textbook
+# photos at 844×1163 / ~900 KB base64); the byte budget is the lever.
+# ---------------------------------------------------------------------------
+
+class TestProactiveAuxResizeGate:
+    @staticmethod
+    def _jpeg(tmp_path, size, quality=30, noise=True):
+        import io as _io
+        import os as _os
+        from PIL import Image as _PIL
+        if noise:
+            raw = _os.urandom(size[0] * size[1] * 3)
+            img = _PIL.frombytes("RGB", size, raw)
+        else:
+            img = _PIL.new("RGB", size, (200, 120, 40))
+        p = tmp_path / f"fx_{size[0]}x{size[1]}.jpg"
+        img.save(p, format="JPEG", quality=quality)
+        return p
+
+    def test_gate_decisions(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        import tools.vision_tools as vt
+
+        small = self._jpeg(tmp_path, (60, 40))
+        # Under budget, modest dims → no gate.
+        monkeypatch.setattr(
+            vt.Path, "stat", lambda self: SimpleNamespace(st_size=100 * 1024))
+        assert vt._needs_proactive_aux_resize(small) == (False, None)
+
+        # 18:11 motivating case: ~687 KB file (est b64 ~916 KB) at 844×1163 —
+        # bytes-only trigger, NO dimension cap (quality ladder keeps dims).
+        monkeypatch.setattr(
+            vt.Path, "stat", lambda self: SimpleNamespace(st_size=687 * 1024))
+        assert vt._needs_proactive_aux_resize(small) == (True, None)
+
+        # Genuinely huge photo (3000 px long side, small bytes) → cap joins.
+        huge = self._jpeg(tmp_path, (3000, 60), noise=False)
+        monkeypatch.setattr(
+            vt.Path, "stat", lambda self: SimpleNamespace(st_size=50 * 1024))
+        needs, cap = vt._needs_proactive_aux_resize(huge)
+        assert needs is True and cap == vt._PROACTIVE_AUX_RESIZE_DIMENSION_CAP
+
+    @pytest.mark.asyncio
+    async def test_dispatch_paths(self, tmp_path, monkeypatch):
+        import tools.vision_tools as vt
+
+        p = self._jpeg(tmp_path, (60, 40))
+        calls = {}
+
+        def fake_resize(path, **kw):
+            calls["resize"] = kw
+            return "data:image/jpeg;base64,RESIZED"
+
+        def fake_plain(path, mime_type=None):
+            calls["plain"] = True
+            return "data:image/jpeg;base64,PLAIN"
+
+        monkeypatch.setattr(vt, "_resize_image_for_vision", fake_resize)
+        monkeypatch.setattr(vt, "_image_to_base64_data_url", fake_plain)
+
+        # No gate → plain full encode.
+        calls.clear()
+        monkeypatch.setattr(vt, "_needs_proactive_aux_resize", lambda path: (False, None))
+        assert (await vt._encode_for_aux_send(p, None, None)).endswith("PLAIN")
+        assert "resize" not in calls and calls.get("plain") is True
+
+        # Byte gate → resize WITHOUT max_dimension, budget = gate constant.
+        calls.clear()
+        monkeypatch.setattr(vt, "_needs_proactive_aux_resize", lambda path: (True, None))
+        assert (await vt._encode_for_aux_send(p, None, None)).endswith("RESIZED")
+        assert calls["resize"]["max_base64_bytes"] == vt._PROACTIVE_AUX_RESIZE_BASE64_BYTES
+        assert "max_dimension" not in calls["resize"]
+
+        # Dimension gate → cap passed through.
+        calls.clear()
+        monkeypatch.setattr(
+            vt, "_needs_proactive_aux_resize",
+            lambda path: (True, vt._PROACTIVE_AUX_RESIZE_DIMENSION_CAP))
+        assert (await vt._encode_for_aux_send(p, None, None)).endswith("RESIZED")
+        assert calls["resize"]["max_dimension"] == vt._PROACTIVE_AUX_RESIZE_DIMENSION_CAP
+
+    @pytest.mark.asyncio
+    async def test_resize_failure_falls_back_to_plain(self, tmp_path, monkeypatch):
+        import tools.vision_tools as vt
+
+        p = self._jpeg(tmp_path, (60, 40))
+
+        def bad_resize(path, **kw):
+            raise RuntimeError("boom")
+
+        def fake_plain(path, mime_type=None):
+            return "data:image/jpeg;base64,PLAIN"
+
+        monkeypatch.setattr(vt, "_resize_image_for_vision", bad_resize)
+        monkeypatch.setattr(vt, "_image_to_base64_data_url", fake_plain)
+        monkeypatch.setattr(vt, "_needs_proactive_aux_resize", lambda path: (True, None))
+        assert (await vt._encode_for_aux_send(p, None, None)).endswith("PLAIN")
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_noisy_textbook_photo_shrinks(self, tmp_path):
+        """Real 844×1163 noisy JPEG (the 18:11 shape class) goes through the
+        actual resize ladder and comes back meaningfully smaller."""
+        import tools.vision_tools as vt
+
+        p = self._jpeg(tmp_path, (844, 1163), quality=85)
+        full = await vt._run_encode_on_cpu_executor(
+            vt._image_to_base64_data_url, p)
+        gated = await vt._encode_for_aux_send(p, None, None)
+        assert gated.startswith("data:image/jpeg;base64,")
+        assert len(gated) < len(full), (
+            f"gate did not shrink noisy photo: full={len(full)} gated={len(gated)}"
+        )

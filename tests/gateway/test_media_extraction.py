@@ -573,3 +573,15 @@ class TestStaleToolMediaLeak:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestAutoAppendWhitelistMembership:
+    """Pin (2026-09-06 评审 C1): the LT 师训听力音频 MCP tool must be on the
+    auto-append whitelist, or its MEDIA: mp3 artifacts never reach the teacher
+    unless the model echoes the tag. Renaming the server/tool requires
+    updating the wire name here and in gateway/run.py in lockstep."""
+
+    def test_listening_audio_wire_name_whitelisted(self):
+        from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
+
+        assert "mcp__llm-wiki-training__teacher_tutor_listening_audio" in _AUTO_APPEND_MEDIA_TOOL_NAMES

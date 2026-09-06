@@ -746,6 +746,18 @@ _EMBED_MAX_DIMENSION = 1568
 # rejects an image, we downscale to this target and retry once.
 _RESIZE_TARGET_BYTES = 5 * 1024 * 1024
 
+# Proactive aux-LLM gate (2026-09-06): highly-compressed JPEGs — e.g. WeCom
+# textbook photos at 844×1163 — sit far under the 20 MB hard cap yet time out
+# upstream at full resolution (~900 KB base64 > 120 s), while a same-size q85
+# re-encode (~380 KB) succeeds in ~31 s.  The byte budget is the effective
+# lever (JPEG quality ladder keeps dimensions, so text stays legible); the
+# dimension cap only joins for genuinely huge photos (> 2048 px), where the
+# halving loop lands at 1024-1500 px and dense screenshots would rather ride
+# the byte ladder instead.
+_PROACTIVE_AUX_RESIZE_BASE64_BYTES = 512 * 1024
+_PROACTIVE_AUX_RESIZE_DIMENSION = 2048
+_PROACTIVE_AUX_RESIZE_DIMENSION_CAP = 1568
+
 
 def _is_image_size_error(error: Exception) -> bool:
     """Detect if an API error is related to image or payload size."""
@@ -1063,6 +1075,61 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
 
     # Shouldn't reach here, but fall back to full encode
     return data_url or _image_to_base64_data_url(image_path, mime_type=mime_type)
+
+
+def _needs_proactive_aux_resize(image_path: Path):
+    """Decide the proactive resize gate for the aux-LLM send path.
+
+    Returns ``(needs_resize, max_dimension)``.  The byte-budget gate fires on
+    estimated base64 size alone (the JPEG quality ladder then re-encodes at
+    the SAME dimensions); the dimension cap only joins for genuinely huge
+    photos — see the ``_PROACTIVE_AUX_RESIZE_*`` notes for why bytes, not
+    pixels, are the primary lever.
+    """
+    file_size = image_path.stat().st_size
+    estimated_b64 = (file_size * 4) // 3 + 100
+    over_bytes = estimated_b64 > _PROACTIVE_AUX_RESIZE_BASE64_BYTES
+    over_dims = False
+    try:
+        from PIL import Image as _PILGate
+        with _PILGate.open(image_path) as _gate_img:
+            if max(_gate_img.size) > _PROACTIVE_AUX_RESIZE_DIMENSION:
+                over_dims = True
+    except Exception:
+        pass  # no Pillow / unreadable — the byte estimate decides alone
+    if over_bytes or over_dims:
+        return True, (_PROACTIVE_AUX_RESIZE_DIMENSION_CAP if over_dims else None)
+    return False, None
+
+
+async def _encode_for_aux_send(image_path: Path, mime_type, scale_out):
+    """Encode an image for the aux-LLM call behind the proactive gate.
+
+    Full-resolution-first was the 120 s-timeout root cause for mid-size
+    compressed photos; this routes oversized-but-under-hard-cap images
+    through ``_resize_image_for_vision`` under the byte budget BEFORE the
+    first upstream call.  Any resize failure falls back to the plain encode
+    (previous behavior) rather than blocking the call.
+    """
+    needs_resize, max_dimension = _needs_proactive_aux_resize(image_path)
+    if not needs_resize:
+        return await _run_encode_on_cpu_executor(
+            _image_to_base64_data_url, image_path, mime_type=mime_type)
+    resize_kwargs = {
+        "mime_type": mime_type,
+        "max_base64_bytes": _PROACTIVE_AUX_RESIZE_BASE64_BYTES,
+        "scale_out": scale_out,
+    }
+    if max_dimension:
+        resize_kwargs["max_dimension"] = max_dimension
+    try:
+        return await _run_encode_on_cpu_executor(
+            _resize_image_for_vision, image_path, **resize_kwargs)
+    except Exception as exc:
+        logger.warning(
+            "Proactive aux resize failed (%s); sending full-resolution instead", exc)
+        return await _run_encode_on_cpu_executor(
+            _image_to_base64_data_url, image_path, mime_type=mime_type)
 
 
 # ---------------------------------------------------------------------------
@@ -1567,13 +1634,14 @@ async def vision_analyze_tool(
             detected_mime_type = cropped_mime
             should_cleanup = True
 
-        # Convert image to base64 — send at full resolution first.
-        # If the provider rejects it as too large, we auto-resize and retry.
-        # Offloaded to the bounded vision CPU executor so a fan-out of encodes
-        # can't saturate every core and starve the event loop.
+        # Convert image to base64 — behind the proactive resize gate (mid-size
+        # compressed photos time out upstream at full resolution; see
+        # _PROACTIVE_AUX_RESIZE_* notes).  Offloaded to the bounded vision CPU
+        # executor so a fan-out of encodes can't saturate every core and
+        # starve the event loop.
         logger.info("Converting image to base64...")
-        image_data_url = await _run_encode_on_cpu_executor(
-            _image_to_base64_data_url, temp_image_path, mime_type=detected_mime_type)
+        image_data_url = await _encode_for_aux_send(
+            temp_image_path, detected_mime_type, _scale_info)
         data_size_kb = len(image_data_url) / 1024
         logger.info("Image converted to base64 (%.1f KB)", data_size_kb)
 
@@ -1583,6 +1651,7 @@ async def vision_analyze_tool(
             image_data_url = await _run_encode_on_cpu_executor(
                 _resize_image_for_vision,
                 temp_image_path, mime_type=detected_mime_type,
+                max_dimension=_PROACTIVE_AUX_RESIZE_DIMENSION_CAP,
                 scale_out=_scale_info)
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 raise ValueError(
@@ -1661,6 +1730,7 @@ async def vision_analyze_tool(
                 image_data_url = await _run_encode_on_cpu_executor(
                     _resize_image_for_vision,
                     temp_image_path, mime_type=detected_mime_type,
+                    max_dimension=_PROACTIVE_AUX_RESIZE_DIMENSION_CAP,
                     scale_out=_scale_info)
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
                 response = await async_call_llm(**call_kwargs)

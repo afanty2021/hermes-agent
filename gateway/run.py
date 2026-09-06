@@ -2021,6 +2021,9 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "text_to_speech",
     "text_to_speech_tool",
     "image_generate",
+    # LT 师训听力音频工具（mp3 产物经 MEDIA: 标签投递，2026-09-06 评审 C1）：
+    # 线名必须与实际注册名逐字一致（server 名/tool 名改动时同步）。
+    "mcp__llm-wiki-training__teacher_tutor_listening_audio",
 }
 
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------
