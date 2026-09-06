@@ -206,7 +206,12 @@ matrix = ["mautrix[encryption]==0.21.1", "aiosqlite==0.22.1", "asyncpg==0.31.0",
 # replacement for stdlib xml.etree.ElementTree) to block billion-laughs
 # and XXE. aiohttp/httpx are already in [messaging]; defusedxml lands
 # here to keep the dependency local to wecom_callback's threat model.
-wecom = ["defusedxml==0.7.1"]
+# pillow-heif: inbound HEIC/HEIF (iPhone default camera format) → JPEG
+# transcoding in wecom/adapter.py `_convert_heic_to_jpeg` — without it the
+# adapter silently degrades to the old reject-and-drop behavior (lazy import
+# keeps absence non-fatal), so declare it here to make the deployment
+# difference visible on fresh installs.
+wecom = ["defusedxml==0.7.1", "pillow-heif==1.6.0"]
 tts-premium = ["elevenlabs==1.59.0"]
 voice = [
   # Local STT pulls in wheel-only transitive deps (ctranslate2, onnxruntime).

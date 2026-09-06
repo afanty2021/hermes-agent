@@ -42,6 +42,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
@@ -1674,7 +1675,9 @@ class WeComAdapter(BasePlatformAdapter):
         try:
             ext = self._detect_image_ext(raw)
             if ext == ".heic":
-                raw = self._convert_heic_to_jpeg(raw)
+                # CPU 密集（12MP 实测 ~446ms/张）——进线程池跑，勿阻塞事件循环
+                # （仓内惯例见 base.py 的 to_thread；评审 I1）
+                raw = await asyncio.to_thread(self._convert_heic_to_jpeg, raw)
                 ext = ".jpg"
             return await cache_image_from_bytes_async(raw, ext), self._mime_for_ext(ext, fallback=fallback_mime)
         except ValueError as exc:
@@ -1689,8 +1692,6 @@ class WeComAdapter(BasePlatformAdapter):
         依赖 pillow-heif（懒加载；未安装 → ImportError → ValueError 拒收不崩）。
         失败统一抛 ValueError，沿用「非图拒收」通道。"""
         try:
-            from io import BytesIO
-
             from PIL import Image, ImageOps
             from pillow_heif import register_heif_opener
 
@@ -1734,8 +1735,10 @@ class WeComAdapter(BasePlatformAdapter):
         # 硬编码表而非 mimetypes.types_map：types_map 在进程未 mimetypes.init()
         # （且未调过任何 guess_*）时静态缺 .webp，直读会把 webp 图打回 fallback
         # octet-stream → DOCUMENT 误判（评审 I1；旧码靠 guess_extension 内部必
-        # init 的副作用意外免疫，魔数优先重构拆掉了该隐性保险）。域 =
-        # _detect_image_ext 输出 ⊆ 此四项。
+        # init 的副作用意外免疫，魔数优先重构拆掉了该隐性保险）。注意域：
+        # _detect_image_ext 现还可输出 .heic，但那是暂态——唯一调用方
+        # _cache_inbound_image 在查本表前已转码 .jpg；.heic 刻意不进表（若未来
+        # 意外直达本表，落 fallback 走 DOCUMENT 可见拒收，胜过谎报 image/heic）。
         ext_mime = {
             ".png": "image/png",
             ".jpg": "image/jpeg",

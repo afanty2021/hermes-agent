@@ -1100,6 +1100,64 @@ class TestInboundImageClassification:
             "image", {"url": "https://wecom.cdn/media/get"}
         ) is None
 
+    @pytest.mark.asyncio
+    async def test_heic_base64_branch_converted_to_jpeg(self, monkeypatch):
+        """base64 入站分支同样吃到 HEIC→JPEG 转码（统一入口 _cache_inbound_image
+        的直接证据——两分支共用同一路径，非仅 url 分支）。"""
+        pytest.importorskip("pillow_heif")
+        import base64 as b64
+        from io import BytesIO
+
+        from PIL import Image
+        from pillow_heif import register_heif_opener
+
+        from plugins.platforms.wecom import adapter as adapter_mod
+
+        register_heif_opener()
+        buf = BytesIO()
+        Image.new("RGB", (16, 12), (40, 90, 40)).save(buf, format="HEIF")
+        heic_bytes = buf.getvalue()
+
+        adapter = self._make_adapter()
+        captured = {}
+
+        async def fake_cache(data, ext):
+            captured["ext"] = ext
+            captured["data"] = data
+            return "/cache/img_b64.jpg"
+
+        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+
+        path, mime = await adapter._cache_media(
+            "image", {"base64": b64.b64encode(heic_bytes).decode()}
+        )
+
+        assert captured["ext"] == ".jpg"
+        assert captured["data"].startswith(b"\xff\xd8\xff")
+        assert (path, mime) == ("/cache/img_b64.jpg", "image/jpeg")
+
+    def test_heic_conversion_applies_exif_orientation(self):
+        """exif_transpose 方向修正钉：orientation=6（顺时针 90°）输入 → 输出像素
+        已旋转（宽高互换）。夹具用带 EXIF 的 JPEG——pillow-heif 写 HEIF 时会把
+        orientation 烘进像素（pending tag 造不出来），而 transpose 行本身格式
+        无关。"""
+        pytest.importorskip("pillow_heif")
+        from io import BytesIO
+
+        from PIL import Image
+
+        from plugins.platforms.wecom.adapter import WeComAdapter
+
+        exif = Image.Exif()
+        exif[274] = 6  # Orientation
+        buf = BytesIO()
+        Image.new("RGB", (60, 30), (10, 120, 200)).save(buf, format="JPEG", exif=exif.tobytes())
+        assert Image.open(BytesIO(buf.getvalue())).getexif().get(274) == 6  # 夹具确带 tag
+
+        out = WeComAdapter._convert_heic_to_jpeg(buf.getvalue())
+        back = Image.open(BytesIO(out))
+        assert back.size == (30, 60), "orientation=6 must transpose pixels (60x30 → 30x60)"
+
 
 # === NATIVE STREAMING (msgtype: stream) ===
 
