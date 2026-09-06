@@ -1662,9 +1662,14 @@ class WeComAdapter(BasePlatformAdapter):
 
         content_type = str(headers.get("content-type") or "").split(";", 1)[0].strip() or "application/octet-stream"
         if kind == "image":
-            ext = self._guess_extension(url, content_type, fallback=self._detect_image_ext(raw))
+            # WeCom media downloads arrive as application/octet-stream from an
+            # extension-less URL; guessing from the content type yields ".bin",
+            # which misclassifies the cached image as a binary document
+            # downstream (_derive_message_type keys off the mime). The bytes'
+            # magic is authoritative for images — same as the base64 branch.
+            ext = self._detect_image_ext(raw)
             try:
-                return await cache_image_from_bytes_async(raw, ext), content_type or self._mime_for_ext(ext, fallback="image/jpeg")
+                return await cache_image_from_bytes_async(raw, ext), self._mime_for_ext(ext, fallback=content_type)
             except ValueError as exc:
                 logger.warning("[%s] Rejected non-image bytes from %s: %s", self.name, url, exc)
                 return None

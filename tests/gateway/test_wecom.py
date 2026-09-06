@@ -887,6 +887,82 @@ class TestAttachmentTextMerge:
         assert event.message_type == MessageType.TEXT
 
 
+class TestInboundImageClassification:
+    """WeCom image downloads arrive as application/octet-stream from an
+    extension-less CDN URL. The cached media must still be classified as an
+    image (magic bytes win over the generic content type); otherwise the
+    mime says "application/octet-stream", _derive_message_type promotes the
+    turn to DOCUMENT, and the teacher's photo renders as
+    "[The user sent a document: 'img_xxx.bin' …]" instead of reaching the
+    model as a picture."""
+
+    @staticmethod
+    def _make_adapter():
+        from plugins.platforms.wecom.adapter import WeComAdapter
+
+        return WeComAdapter(
+            PlatformConfig(enabled=True, extra={"dm_policy": "open"})
+        )
+
+    @pytest.mark.asyncio
+    async def test_octet_stream_image_keeps_image_mime(self, monkeypatch):
+        from plugins.platforms.wecom import adapter as adapter_mod
+        from gateway.platforms.base import MessageType
+
+        adapter = self._make_adapter()
+        jpeg_magic = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+        async def fake_download(url, max_bytes=None):
+            return jpeg_magic, {"content-type": "application/octet-stream"}
+
+        monkeypatch.setattr(adapter, "_download_remote_bytes", fake_download)
+
+        captured = {}
+
+        async def fake_cache(data, ext):
+            captured["ext"] = ext
+            assert data == jpeg_magic
+            return "/cache/img_abc.jpg"
+
+        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+
+        path, mime = await adapter._cache_media(
+            "image", {"url": "https://wecom.cdn/media/get"}
+        )
+
+        assert path == "/cache/img_abc.jpg"
+        assert captured["ext"] == ".jpg"
+        assert mime == "image/jpeg"
+        # Downstream classification: image-only → PHOTO, image+text → TEXT —
+        # never DOCUMENT (that is the bug this pins).
+        assert adapter._derive_message_type({}, "", [mime]) is MessageType.PHOTO
+        assert adapter._derive_message_type({}, "看看这张图", [mime]) is MessageType.TEXT
+
+    @pytest.mark.asyncio
+    async def test_explicit_image_content_type_still_classified(self, monkeypatch):
+        """A server that DOES send image/png must keep working after the
+        magic-first change (PNG magic and the content type agree anyway)."""
+        from plugins.platforms.wecom import adapter as adapter_mod
+
+        adapter = self._make_adapter()
+        png_magic = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+        async def fake_download(url, max_bytes=None):
+            return png_magic, {"content-type": "image/png"}
+
+        monkeypatch.setattr(adapter, "_download_remote_bytes", fake_download)
+
+        async def fake_cache(data, ext):
+            assert ext == ".png"
+            return "/cache/img_abc.png"
+
+        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+
+        path, mime = await adapter._cache_media(
+            "image", {"url": "https://wecom.cdn/media/get"}
+        )
+        assert (path, mime) == ("/cache/img_abc.png", "image/png")
+
 
 # === NATIVE STREAMING (msgtype: stream) ===
 
