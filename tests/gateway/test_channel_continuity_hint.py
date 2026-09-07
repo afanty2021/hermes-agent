@@ -102,3 +102,40 @@ class TestBuildChannelContinuityNote:
         entry = _reset_entry(Platform.SLACK, had_activity=False)
         assert build_channel_continuity_note(entry, _slack_source()) is None
 
+
+
+class TestWecomContinuityHint:
+    """WeCom DMs join the continuity-hint surface (2026-09-07 incident: daily
+    04:00 reset left a teacher's 10:41 follow-up on a history=0 session)."""
+
+    @staticmethod
+    def _wecom_source():
+        return SessionSource(
+            platform=Platform.WECOM,
+            chat_id="ggtms",
+            chat_type="dm",
+            user_id="ggtms",
+            thread_id=None,
+        )
+
+    def test_wecom_dm_emits_hint_with_chat_wording(self):
+        entry = _reset_entry(Platform.WECOM)
+        note = build_channel_continuity_note(entry, self._wecom_source())
+        assert note is not None
+        assert "session_search" in note
+        assert entry.prev_session_id in note
+        assert "chat" in note
+        assert "channel" not in note and "thread" not in note
+
+    def test_wecom_no_activity_returns_none(self):
+        entry = _reset_entry(Platform.WECOM, had_activity=False)
+        assert build_channel_continuity_note(entry, self._wecom_source()) is None
+
+    def test_wecom_no_prev_session_returns_none(self):
+        entry = _reset_entry(Platform.WECOM, prev=None)
+        assert build_channel_continuity_note(entry, self._wecom_source()) is None
+
+    def test_slack_wording_unchanged(self):
+        entry = _reset_entry(Platform.SLACK)
+        note = build_channel_continuity_note(entry, _slack_source())
+        assert note is not None and "channel" in note
