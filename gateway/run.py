@@ -2021,11 +2021,14 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "text_to_speech",
     "text_to_speech_tool",
     "image_generate",
-    # LT 师训听力音频工具（mp3 产物经 MEDIA: 标签投递，2026-09-06 评审 C1）：
-    # 线名必须与实际注册名逐字一致（server 名/tool 名改动时同步）。
-    "mcp__llm-wiki-training__teacher_tutor_listening_audio",
-    # LT 师训思维导图工具（png 产物同链投递，2026-09-09 方案）。
-    "mcp__llm-wiki-training__teacher_tutor_mindmap",
+    # LT 师训听力音频/思维导图 MCP 工具（mp3/png 产物经 MEDIA: 标签投递）。
+    # ⚠ 线名必须是「净化后派发名」：mcp_prefixed_tool_name（tools/mcp_tool.py
+    # sanitize_mcp_name_component）把服务器名连字符统一换下划线——写配置侧
+    # 服务器名（连字符形态）永不匹配，兜底即死代码（2026-09-10 评审 C1，
+    # listening_audio 自 09-06 修复起连坐四天）。行为级测试见
+    # tests/gateway/test_media_extraction.py::TestAutoAppendWhitelistMembership。
+    "mcp__llm_wiki_training__teacher_tutor_listening_audio",
+    "mcp__llm_wiki_training__teacher_tutor_mindmap",
 }
 
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------

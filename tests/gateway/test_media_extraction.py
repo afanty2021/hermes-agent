@@ -576,17 +576,69 @@ if __name__ == "__main__":
 
 
 class TestAutoAppendWhitelistMembership:
-    """Pin (2026-09-06 评审 C1): the LT 师训听力音频 MCP tool must be on the
-    auto-append whitelist, or its MEDIA: mp3 artifacts never reach the teacher
-    unless the model echoes the tag. Renaming the server/tool requires
-    updating the wire name here and in gateway/run.py in lockstep."""
+    """Pin (2026-09-06 评审 C1 / 2026-09-10 评审 C1+I4): the LT 师训 MCP tools
+    must be on the auto-append whitelist under their SANITIZED dispatch names.
+    ``mcp_prefixed_tool_name`` converts hyphens to underscores, so writing the
+    config-side server name ("llm-wiki-training") never matches at runtime —
+    that dead form shipped 09-06 and silently disabled the fallback for four
+    days. Tests construct the expected name via ``mcp_prefixed_tool_name`` and
+    drive the real collector with real-shape message lists (behavioral, not
+    same-string-literal self-assertion)."""
 
     def test_listening_audio_wire_name_whitelisted(self):
         from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
+        from tools.mcp_tool import mcp_prefixed_tool_name
 
-        assert "mcp__llm-wiki-training__teacher_tutor_listening_audio" in _AUTO_APPEND_MEDIA_TOOL_NAMES
+        assert (
+            mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_listening_audio")
+            in _AUTO_APPEND_MEDIA_TOOL_NAMES
+        )
 
     def test_mindmap_wire_name_whitelisted(self):
         from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
+        from tools.mcp_tool import mcp_prefixed_tool_name
 
-        assert "mcp__llm-wiki-training__teacher_tutor_mindmap" in _AUTO_APPEND_MEDIA_TOOL_NAMES
+        assert (
+            mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_mindmap")
+            in _AUTO_APPEND_MEDIA_TOOL_NAMES
+        )
+
+    def _tool_round_messages(self, tool_name: str) -> list:
+        """Real-shape one-tool-round message list with a non-echoing final reply
+        (the exact scenario the fallback exists for: model forgets MEDIA line)."""
+        return [
+            {"role": "user", "content": "帮我出一张思维导图"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": tool_name, "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "call_1",
+             "content": "思维导图已生成（5 个节点 / 3 层）。\nMEDIA:/tmp/x/mindmap-abc123.png\n"
+                        "给教师的最终回复必须原样保留上面 MEDIA: 开头那一行，图片才能送达。"},
+        ]
+
+    def test_auto_append_collects_mindmap_media_on_real_dispatch_name(self):
+        from gateway.run import _collect_auto_append_media_tags
+        from tools.mcp_tool import mcp_prefixed_tool_name
+
+        messages = self._tool_round_messages(
+            mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_mindmap"))
+        media_tags, _ = _collect_auto_append_media_tags(messages)
+        assert media_tags == ["MEDIA:/tmp/x/mindmap-abc123.png"]
+
+    def test_auto_append_collects_listening_media_on_real_dispatch_name(self):
+        from gateway.run import _collect_auto_append_media_tags
+        from tools.mcp_tool import mcp_prefixed_tool_name
+
+        messages = self._tool_round_messages(
+            mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_listening_audio"))
+        media_tags, _ = _collect_auto_append_media_tags(messages)
+        assert media_tags == ["MEDIA:/tmp/x/mindmap-abc123.png"]
+
+    def test_auto_append_ignores_unrelated_tool_media(self):
+        # #16721 语义回归：非白名单工具结果里的 MEDIA: 示例字符串不得被收集。
+        from gateway.run import _collect_auto_append_media_tags
+
+        messages = self._tool_round_messages("mcp__other_server__read_docs")
+        media_tags, _ = _collect_auto_append_media_tags(messages)
+        assert media_tags == []
