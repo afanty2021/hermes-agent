@@ -314,3 +314,66 @@ class TestAdvanceCompressionSession:
         assert store.suspend_recently_active(max_age_seconds=120) == 0
 
 
+
+
+class TestStaleRebuildCarriesContinuityHint:
+    """Stale rebuild with no pending reset decision must still arm the
+    continuity hint (2026-09-09 ggtms incident).
+
+    The daily-reset finalizer ends the row in state.db at 04:00 while
+    sessions.json still routes to the old id.  At the next message the
+    #54878 stale guard drops the entry; `_should_reset` no longer returns a
+    reason (the finalizer already consumed the daily boundary), so the fresh
+    session used to be created with no `prev_session_id` — the WeCom
+    continuity hint never fired and the agent answered with zero knowledge
+    of the prior same-chat session, re-recommending content it had already
+    given the night before.
+    """
+
+    def test_stale_session_reset_end_creates_fresh_with_continuity_metadata(
+        self, tmp_path,
+    ):
+        source = _source()
+        # end_reason=session_reset is NOT recoverable by the recovery finder
+        # (only agent_close/ws_orphan_reap rows reopen), so the outcome is a
+        # fresh session.  Policy mode="none" keeps `_reset_reason` empty —
+        # the exact shape the fix targets.
+        db = _db_returning({"sid_stale": {"end_reason": "session_reset", "id": "sid_stale"}})
+        store = _make_store_with_db(tmp_path, db)
+        key = store._generate_session_key(source)
+        entry = _make_entry(key, "sid_stale")
+        entry.last_prompt_tokens = 100  # real activity in the prior session
+        store._entries[key] = entry
+
+        result = store.get_or_create_session(source)
+
+        # Fresh session carrying auto-reset metadata + continuity pointer.
+        assert result.session_id != "sid_stale"
+        assert result.was_auto_reset is True
+        assert result.auto_reset_reason == "stale_recovery"
+        assert result.prev_session_id == "sid_stale"
+        assert result.reset_had_activity is True
+        db.reopen_session.assert_not_called()
+        db.create_session.assert_called_once()
+        # parent_session_id records the lineage for session_search recall.
+        assert db.create_session.call_args.kwargs.get("parent_session_id") == "sid_stale"
+
+    def test_stale_recoverable_end_still_reopens_without_auto_reset(self, tmp_path):
+        """Recoverable end_reason (ws_orphan_reap) → transcript preserved; the
+        stale-recovery flags must NOT mark the reopened session as auto-reset."""
+        source = _source()
+        db = _db_returning({"sid_stale": {"end_reason": "ws_orphan_reap", "id": "sid_stale"}})
+        db.find_latest_gateway_session_for_peer.return_value = {
+            "id": "sid_stale",
+            "started_at": (datetime.now() - timedelta(hours=2)).timestamp(),
+        }
+        store = _make_store_with_db(tmp_path, db)
+        key = store._generate_session_key(source)
+        store._entries[key] = _make_entry(key, "sid_stale")
+
+        result = store.get_or_create_session(source)
+
+        assert result.session_id == "sid_stale"
+        assert result.was_auto_reset is False
+        assert result.auto_reset_reason != "stale_recovery"
+        db.reopen_session.assert_called_once_with("sid_stale")

@@ -21481,6 +21481,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 context_note = "[System note: The user's session was automatically reset by the daily schedule. This is a fresh conversation with no prior context.]"
             elif reset_reason == "resume_pending_expired":
                 context_note = "[System note: The previous gateway session could not be recovered after a restart (API recovery timed out). This is a fresh conversation — use /resume to restore history if needed.]"
+            elif reset_reason == "stale_recovery":
+                context_note = "[System note: The user's previous session had already ended when this conversation started, so a fresh session was created. This is a fresh conversation with no prior context.]"
             else:
                 context_note = "[System note: The user's previous session expired due to inactivity. This is a fresh conversation with no prior context.]"
             # Slack/Discord channels/threads are long-lived: point the agent at
@@ -21511,8 +21513,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # regardless of policy.notify — the user had an active session
                 # that was silently replaced, so they need to know they can
                 # /resume it.  Idle/daily resets respect the policy flag.
+                # stale_recovery: the end was already user-facing when the
+                # finalizer ran (e.g. the daily reset notice) — don't double-
+                # notify hours later; the agent-side context note suffices.
                 should_notify = reset_reason in {"suspended", "resume_pending_expired"} or (
-                    policy.notify
+                    reset_reason != "stale_recovery"
+                    and policy.notify
                     and had_activity
                     and platform_name not in policy.notify_exclude_platforms
                 )

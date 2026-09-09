@@ -3079,6 +3079,23 @@ class SessionStore:
                         reset_had_activity = entry.last_prompt_tokens > 0
                         db_end_session_id = entry.session_id
                         prev_session_id = entry.session_id
+                    else:
+                        # Stale rebuild with no pending reset decision: the
+                        # routing entry pointed at a session the state store
+                        # already ended (e.g. the daily-reset finalizer ran
+                        # while sessions.json still held the old id). Recovery
+                        # may still reopen a recoverable end_reason (transcript
+                        # preserved — the flags below are then ignored); if it
+                        # cannot, the fresh session must carry the same
+                        # continuity hint an auto-reset gives — otherwise the
+                        # agent answers with zero knowledge of the prior
+                        # same-chat session (2026-09-09 ggtms: overnight
+                        # session_reset; morning follow-up got no hint and
+                        # re-recommended the prior night's video).
+                        was_auto_reset = True
+                        auto_reset_reason = "stale_recovery"
+                        reset_had_activity = entry.last_prompt_tokens > 0
+                        prev_session_id = entry.session_id
                     entry = None
                     _needs_recover = True
                 elif entry.session_id != _stale_session_id:
