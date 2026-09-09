@@ -585,3 +585,8 @@ class TestAutoAppendWhitelistMembership:
         from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
 
         assert "mcp__llm-wiki-training__teacher_tutor_listening_audio" in _AUTO_APPEND_MEDIA_TOOL_NAMES
+
+    def test_mindmap_wire_name_whitelisted(self):
+        from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
+
+        assert "mcp__llm-wiki-training__teacher_tutor_mindmap" in _AUTO_APPEND_MEDIA_TOOL_NAMES

@@ -2024,6 +2024,8 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     # LT 师训听力音频工具（mp3 产物经 MEDIA: 标签投递，2026-09-06 评审 C1）：
     # 线名必须与实际注册名逐字一致（server 名/tool 名改动时同步）。
     "mcp__llm-wiki-training__teacher_tutor_listening_audio",
+    # LT 师训思维导图工具（png 产物同链投递，2026-09-09 方案）。
+    "mcp__llm-wiki-training__teacher_tutor_mindmap",
 }
 
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------
