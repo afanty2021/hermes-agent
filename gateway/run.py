@@ -2029,6 +2029,8 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     # tests/gateway/test_media_extraction.py::TestAutoAppendWhitelistMembership。
     "mcp__llm_wiki_training__teacher_tutor_listening_audio",
     "mcp__llm_wiki_training__teacher_tutor_mindmap",
+    # LT 师训学案海报工具（png 产物同链投递，2026-09-10 方案）。
+    "mcp__llm_wiki_training__teacher_tutor_worksheet",
 }
 
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------

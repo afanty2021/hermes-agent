@@ -603,6 +603,24 @@ class TestAutoAppendWhitelistMembership:
             in _AUTO_APPEND_MEDIA_TOOL_NAMES
         )
 
+    def test_worksheet_wire_name_whitelisted(self):
+        from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
+        from tools.mcp_tool import mcp_prefixed_tool_name
+
+        assert (
+            mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_worksheet")
+            in _AUTO_APPEND_MEDIA_TOOL_NAMES
+        )
+
+    def test_auto_append_collects_worksheet_media_on_real_dispatch_name(self):
+        from gateway.run import _collect_auto_append_media_tags
+        from tools.mcp_tool import mcp_prefixed_tool_name
+
+        messages = self._tool_round_messages(
+            mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_worksheet"))
+        media_tags, _ = _collect_auto_append_media_tags(messages)
+        assert media_tags == ["MEDIA:/tmp/x/mindmap-abc123.png"]
+
     def _tool_round_messages(self, tool_name: str) -> list:
         """Real-shape one-tool-round message list with a non-echoing final reply
         (the exact scenario the fallback exists for: model forgets MEDIA line)."""
