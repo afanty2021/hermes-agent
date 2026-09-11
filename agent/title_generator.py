@@ -537,6 +537,7 @@ def auto_title_session(
     title_callback: Optional[TitleCallback] = None,
     runtime_validator: Optional[RuntimeValidator] = None,
     secret_scope: Optional[Mapping[str, str]] = None,
+    hermes_home: Optional[str] = None,
 ) -> None:
     """Generate and store the model title for a session.
 
@@ -546,13 +547,17 @@ def auto_title_session(
     - title generation fails
     - runtime_validator returns False (model was switched)
 
-    ``secret_scope`` republishes the caller's profile secret scope
-    (``agent.secret_scope``) on this thread. A ``threading.Thread`` starts
-    with a fresh context, so the contextvar-installed per-turn scope is
+    ``secret_scope`` / ``hermes_home`` republish the caller's profile
+    boundary (``agent.secret_scope`` + the Hermes home override) on this
+    thread. A ``threading.Thread`` starts with a fresh context, so both
+    contextvars installed by the gateway's ``_profile_runtime_scope`` are
     invisible here — under multiplexing the title LLM call would fail closed
-    on ``get_secret`` every single turn. ``maybe_auto_title`` captures the
-    mapping while the turn's scope is active and passes it in; when None
-    (single-profile callers), nothing is installed and behavior is unchanged.
+    on ``get_secret`` every single turn, and the home-dependent reads
+    (``load_env`` in ``get_env_value_prefer_dotenv``, aux config) would
+    resolve the *default* profile's ``.env`` and config instead of this
+    profile's. ``maybe_auto_title`` captures both while the turn's scope is
+    active and passes them in; when None (single-profile callers), nothing
+    is installed and behavior is unchanged.
 
     Never lets an exception escape: this is a daemon-thread target, and an
     escaping exception would spray a raw traceback into the user's terminal
@@ -565,10 +570,15 @@ def auto_title_session(
     """
     try:
         scope_token = None
+        home_token = None
         if secret_scope is not None:
             from agent.secret_scope import set_secret_scope
 
             scope_token = set_secret_scope(secret_scope)
+        if hermes_home is not None:
+            from hermes_constants import set_hermes_home_override
+
+            home_token = set_hermes_home_override(hermes_home)
         try:
             _auto_title_session(
                 session_db,
@@ -584,6 +594,10 @@ def auto_title_session(
                 from agent.secret_scope import reset_secret_scope
 
                 reset_secret_scope(scope_token)
+            if home_token is not None:
+                from hermes_constants import reset_hermes_home_override
+
+                reset_hermes_home_override(home_token)
     except Exception as e:
         # WARNING (not debug) so operators see it in agent.log; the message
         # names the likely cause so "restart the process" is discoverable.
@@ -768,14 +782,16 @@ def maybe_auto_title(
     apply_instant_title(session_db, session_id, user_message, title_callback)
 
     # The daemon thread starts with a fresh context, so the turn's profile
-    # secret scope (a contextvar installed by the gateway's
-    # _profile_runtime_scope) is invisible there — under multiplexing the
-    # title LLM call fails closed on get_secret. Capture the mapping now,
-    # while the turn's scope is active, and republish it on the thread (the
-    # same pattern _auto_title_session already uses for the conversation and
-    # accounting contexts). None outside multiplex deployments: nothing is
-    # installed and behavior is unchanged.
+    # boundary (contextvars installed by the gateway's _profile_runtime_scope)
+    # is invisible there — under multiplexing the title LLM call fails closed
+    # on get_secret, and home-dependent reads would resolve the default
+    # profile's .env/config. Capture both now, while the turn's scope is
+    # active, and republish them on the thread (the same pattern
+    # _auto_title_session already uses for the conversation and accounting
+    # contexts). None outside multiplex deployments: nothing is installed and
+    # behavior is unchanged.
     from agent.secret_scope import current_secret_scope
+    from hermes_constants import get_hermes_home_override
 
     thread = threading.Thread(
         target=auto_title_session,
@@ -786,6 +802,7 @@ def maybe_auto_title(
             "title_callback": title_callback,
             "runtime_validator": runtime_validator,
             "secret_scope": current_secret_scope(),
+            "hermes_home": get_hermes_home_override(),
         },
         daemon=True,
         name="auto-title",

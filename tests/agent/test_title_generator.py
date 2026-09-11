@@ -289,6 +289,7 @@ class TestMaybeAutoTitle:
                 title_callback=None,
                 runtime_validator=None,
                 secret_scope=None,
+                hermes_home=None,
             )
 
     def test_writes_instant_title_before_the_model_runs(self, tmp_path):
@@ -611,13 +612,19 @@ class TestSecretScopePublication:
     captures the mapping at spawn time and republishes it in the worker.
     """
 
-    def test_maybe_auto_title_passes_current_scope_to_worker(self):
+    def test_maybe_auto_title_passes_current_scope_and_home_to_worker(self):
         from agent.secret_scope import current_secret_scope, reset_secret_scope, set_secret_scope
+        from hermes_constants import (
+            get_hermes_home_override,
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
 
         db = MagicMock()
         db.get_session_title.return_value = None
         scope = {"GLM_API_KEY": "sk-profile"}
         token = set_secret_scope(scope)
+        home_token = set_hermes_home_override("/tmp/fake-profile-home")
         try:
             with patch("agent.title_generator.auto_title_session") as mock_auto:
                 import threading
@@ -631,7 +638,10 @@ class TestSecretScopePublication:
                 assert done.wait(timeout=10), "auto_title thread never ran"
             assert seen_kwargs.get("secret_scope") is current_secret_scope()
             assert seen_kwargs["secret_scope"].get("GLM_API_KEY") == "sk-profile"
+            assert seen_kwargs.get("hermes_home") == "/tmp/fake-profile-home"
+            assert get_hermes_home_override() == "/tmp/fake-profile-home"
         finally:
+            reset_hermes_home_override(home_token)
             reset_secret_scope(token)
 
     def test_worker_republishes_scope_for_the_llm_call_and_resets_it(self):
@@ -653,13 +663,31 @@ class TestSecretScopePublication:
             observed["key"] = get_secret("GLM_API_KEY")
             return "Scoped Title"
 
+        def _assert_home(*args, **kwargs):
+            from hermes_constants import get_hermes_home_override
+
+            observed["home"] = get_hermes_home_override()
+            return "Scoped Title"
+
         set_multiplex_active(True)
         try:
-            with patch("agent.title_generator.generate_title", side_effect=_fake_generate):
-                auto_title_session(db, "sess-1", "hello", secret_scope=scope)
+            with patch(
+                "agent.title_generator.generate_title",
+                side_effect=lambda *a, **k: (
+                    _assert_home(), _fake_generate(),
+                )[1],
+            ):
+                auto_title_session(
+                    db, "sess-1", "hello",
+                    secret_scope=scope, hermes_home="/tmp/fake-profile-home",
+                )
             assert observed["key"] == "sk-profile"
+            assert observed["home"] == "/tmp/fake-profile-home"
             db.set_auto_title.assert_called_once_with("sess-1", "Scoped Title", source="llm")
-            # The scope must not leak past the worker into the caller's context.
+            # Neither seam may leak past the worker into the caller's context.
+            from hermes_constants import get_hermes_home_override
+
+            assert get_hermes_home_override() is None
             with pytest.raises(UnscopedSecretError):
                 get_secret("GLM_API_KEY")
         finally:
