@@ -21,7 +21,7 @@ import json
 import logging
 import re
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from agent.auxiliary_client import call_llm
 from agent.context_compressor import LEGACY_SUMMARY_PREFIX
@@ -536,6 +536,7 @@ def auto_title_session(
     main_runtime: dict = None,
     title_callback: Optional[TitleCallback] = None,
     runtime_validator: Optional[RuntimeValidator] = None,
+    secret_scope: Optional[Mapping[str, str]] = None,
 ) -> None:
     """Generate and store the model title for a session.
 
@@ -544,6 +545,14 @@ def auto_title_session(
     - the session already carries an ``llm`` or ``user`` title
     - title generation fails
     - runtime_validator returns False (model was switched)
+
+    ``secret_scope`` republishes the caller's profile secret scope
+    (``agent.secret_scope``) on this thread. A ``threading.Thread`` starts
+    with a fresh context, so the contextvar-installed per-turn scope is
+    invisible here — under multiplexing the title LLM call would fail closed
+    on ``get_secret`` every single turn. ``maybe_auto_title`` captures the
+    mapping while the turn's scope is active and passes it in; when None
+    (single-profile callers), nothing is installed and behavior is unchanged.
 
     Never lets an exception escape: this is a daemon-thread target, and an
     escaping exception would spray a raw traceback into the user's terminal
@@ -555,15 +564,26 @@ def auto_title_session(
     process restarts.
     """
     try:
-        _auto_title_session(
-            session_db,
-            session_id,
-            user_message,
-            failure_callback=failure_callback,
-            main_runtime=main_runtime,
-            title_callback=title_callback,
-            runtime_validator=runtime_validator,
-        )
+        scope_token = None
+        if secret_scope is not None:
+            from agent.secret_scope import set_secret_scope
+
+            scope_token = set_secret_scope(secret_scope)
+        try:
+            _auto_title_session(
+                session_db,
+                session_id,
+                user_message,
+                failure_callback=failure_callback,
+                main_runtime=main_runtime,
+                title_callback=title_callback,
+                runtime_validator=runtime_validator,
+            )
+        finally:
+            if scope_token is not None:
+                from agent.secret_scope import reset_secret_scope
+
+                reset_secret_scope(scope_token)
     except Exception as e:
         # WARNING (not debug) so operators see it in agent.log; the message
         # names the likely cause so "restart the process" is discoverable.
@@ -747,6 +767,16 @@ def maybe_auto_title(
 
     apply_instant_title(session_db, session_id, user_message, title_callback)
 
+    # The daemon thread starts with a fresh context, so the turn's profile
+    # secret scope (a contextvar installed by the gateway's
+    # _profile_runtime_scope) is invisible there — under multiplexing the
+    # title LLM call fails closed on get_secret. Capture the mapping now,
+    # while the turn's scope is active, and republish it on the thread (the
+    # same pattern _auto_title_session already uses for the conversation and
+    # accounting contexts). None outside multiplex deployments: nothing is
+    # installed and behavior is unchanged.
+    from agent.secret_scope import current_secret_scope
+
     thread = threading.Thread(
         target=auto_title_session,
         args=(session_db, session_id, user_message),
@@ -755,6 +785,7 @@ def maybe_auto_title(
             "main_runtime": main_runtime,
             "title_callback": title_callback,
             "runtime_validator": runtime_validator,
+            "secret_scope": current_secret_scope(),
         },
         daemon=True,
         name="auto-title",

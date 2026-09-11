@@ -288,6 +288,7 @@ class TestMaybeAutoTitle:
                 main_runtime=None,
                 title_callback=None,
                 runtime_validator=None,
+                secret_scope=None,
             )
 
     def test_writes_instant_title_before_the_model_runs(self, tmp_path):
@@ -597,3 +598,82 @@ class TestModelSwitchMarkerNotTitleable:
         assert apply_instant_title(db, "sess-1", "南京市秦淮区 小时级天气预报") == (
             "南京市秦淮区 小时级天气预报"
         )
+
+
+class TestSecretScopePublication:
+    """Regression: the title thread must inherit the turn's profile secret scope.
+
+    ``maybe_auto_title`` spawns a bare ``threading.Thread``, which starts with a
+    fresh context — the per-turn scope installed by the gateway's
+    ``_profile_runtime_scope`` (a contextvar) is invisible there. Under
+    multiplexing, ``get_secret`` fails closed, so every single title attempt
+    died with ``UnscopedSecretError`` before sending any request. The fix
+    captures the mapping at spawn time and republishes it in the worker.
+    """
+
+    def test_maybe_auto_title_passes_current_scope_to_worker(self):
+        from agent.secret_scope import current_secret_scope, reset_secret_scope, set_secret_scope
+
+        db = MagicMock()
+        db.get_session_title.return_value = None
+        scope = {"GLM_API_KEY": "sk-profile"}
+        token = set_secret_scope(scope)
+        try:
+            with patch("agent.title_generator.auto_title_session") as mock_auto:
+                import threading
+
+                seen_kwargs = {}
+                done = threading.Event()
+                mock_auto.side_effect = lambda *args, **kwargs: (
+                    seen_kwargs.update(kwargs), done.set(),
+                )
+                maybe_auto_title(db, "sess-1", "hello world", [])
+                assert done.wait(timeout=10), "auto_title thread never ran"
+            assert seen_kwargs.get("secret_scope") is current_secret_scope()
+            assert seen_kwargs["secret_scope"].get("GLM_API_KEY") == "sk-profile"
+        finally:
+            reset_secret_scope(token)
+
+    def test_worker_republishes_scope_for_the_llm_call_and_resets_it(self):
+        from agent.secret_scope import (
+            UnscopedSecretError,
+            get_secret,
+            set_multiplex_active,
+        )
+
+        db = MagicMock()
+        db.get_session_title_source.return_value = None
+        db.set_auto_title.return_value = True
+        scope = {"GLM_API_KEY": "sk-profile"}
+
+        observed = {}
+
+        def _fake_generate(*args, **kwargs):
+            # Under multiplexing this read only succeeds inside the scope.
+            observed["key"] = get_secret("GLM_API_KEY")
+            return "Scoped Title"
+
+        set_multiplex_active(True)
+        try:
+            with patch("agent.title_generator.generate_title", side_effect=_fake_generate):
+                auto_title_session(db, "sess-1", "hello", secret_scope=scope)
+            assert observed["key"] == "sk-profile"
+            db.set_auto_title.assert_called_once_with("sess-1", "Scoped Title", source="llm")
+            # The scope must not leak past the worker into the caller's context.
+            with pytest.raises(UnscopedSecretError):
+                get_secret("GLM_API_KEY")
+        finally:
+            set_multiplex_active(False)
+
+    def test_worker_without_scope_stays_unscoped(self):
+        """Single-profile callers pass None: nothing installed, behavior unchanged."""
+        from agent.secret_scope import current_secret_scope
+
+        db = MagicMock()
+        db.get_session_title_source.return_value = None
+        db.set_auto_title.return_value = True
+
+        with patch("agent.title_generator.generate_title", return_value="Plain Title"):
+            auto_title_session(db, "sess-1", "hello")
+        assert current_secret_scope() is None
+        db.set_auto_title.assert_called_once_with("sess-1", "Plain Title", source="llm")
