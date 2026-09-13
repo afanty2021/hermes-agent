@@ -153,7 +153,9 @@ class WeComMediaMixin:
                 ext = ".jpg"
             cached_path = await cache_image_from_bytes_async(raw, ext)
             await self._archive_inbound_image(raw, ext, chat_id)
-            return cached_path, image_mime or self._mime_for_ext(ext, fallback="image/jpeg")
+            # ext（魔数）权威、CDN 头兜底（fork a2efd297d2 同源原则）：罕见 CDN
+            # 返回 image/heic 头时，转码产物已是 JPEG，按头直传会谎报 MIME。
+            return cached_path, self._mime_for_ext(ext, fallback=image_mime or "image/jpeg")
         except ValueError as exc:
             logger.warning("[%s] Rejected non-image bytes%s: %s", self.name, origin, exc)
             return None

@@ -81,7 +81,7 @@ register_provider(zai)
 # 仅存在于 auth.PROVIDER_REGISTRY/hermes_cli.providers overlay，交互切换会
 # 静默落空（评审发现 B；同型先例：computer_use never-parallel 曾被上游 set
 # 重构 merge 静默吞掉）。凭证/端点探测仍走 auth.ZAI_ENDPOINTS（coding-cn
-# 优先），此处只补 profile 面。子类化 ZaiProfile 继承 thinking 开关与
+# 优先），此处只补 profile 面。实例化 ZaiProfile 承接其 thinking 开关与
 # GLM-5.2/5.3 reasoning_effort 适配（live glm-5.2 依赖 thinking disabled）。
 zai_coding_cn = ZaiProfile(
     name="zai-coding-cn",

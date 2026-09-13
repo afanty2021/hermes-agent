@@ -1014,6 +1014,32 @@ class TestInboundImageClassification:
         )
         assert (path, mime) == ("/cache/img_abc.png", "image/png")
 
+    @pytest.mark.asyncio
+    async def test_heic_cdn_header_cannot_override_magic_mime(self, monkeypatch):
+        """终审 M1：CDN 罕见返回 image/heic 头时不得采信——魔数 ext 权威
+        （fork a2efd297d2 同源原则）。HEIC 头 + JPEG 魔数（转码后同形态）
+        必须落 image/jpeg；头优先的旧形态会谎报 image/heic 下发。"""
+        from plugins.platforms.wecom import adapter as adapter_mod
+        from plugins.platforms.wecom import media as media_mod
+
+        adapter = self._make_adapter()
+        jpeg_magic = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+        async def fake_download(url, max_bytes=None):
+            return jpeg_magic, {"content-type": "image/heic"}
+
+        monkeypatch.setattr(adapter, "_download_remote_bytes", fake_download)
+
+        async def fake_cache(data, ext):
+            return "/cache/img_arch.jpg"
+
+        monkeypatch.setattr(media_mod, "cache_image_from_bytes_async", fake_cache)
+
+        path, mime = await adapter._cache_media(
+            "image", {"url": "https://wecom.cdn/media/get"}
+        )
+        assert (path, mime) == ("/cache/img_arch.jpg", "image/jpeg")
+
     def test_image_mime_table_without_mimetypes_init(self):
         """mimetypes.types_map 静态缺 .webp，直到进程内发生 mimetypes.init()
         或任一 guess_* 调用；_mime_for_ext 不得依赖该隐式初始化（评审 I1：
