@@ -72,6 +72,7 @@ from gateway.platforms.base import (
     cache_document_from_bytes_async,
     cache_image_from_bytes_async,
 )
+from hermes_constants import get_hermes_dir
 from utils import env_float
 
 from agent.secret_scope import UnscopedSecretError as _UnscopedSecretError
@@ -1558,6 +1559,10 @@ class WeComAdapter(BasePlatformAdapter):
 
     async def _extract_media(self, body: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         """Best-effort extraction of inbound media to local cache paths."""
+        # chat_id / 发送者 userid 只用于来图留存副本的文件名归因（见
+        # _archive_inbound_image）；两者都缺时传 None，副本跳过不归档。
+        sender = body.get("from") if isinstance(body.get("from"), dict) else {}
+        chat_id = str(body.get("chatid") or sender.get("userid") or "").strip() or None
         media_paths: List[str] = []
         media_types: List[str] = []
         refs: List[Tuple[str, Dict[str, Any]]] = []
@@ -1595,7 +1600,7 @@ class WeComAdapter(BasePlatformAdapter):
             refs.append(("file", quote["file"]))
 
         for kind, ref in refs:
-            cached = await self._cache_media(kind, ref)
+            cached = await self._cache_media(kind, ref, chat_id=chat_id)
             if cached:
                 path, content_type = cached
                 media_paths.append(path)
@@ -1603,7 +1608,9 @@ class WeComAdapter(BasePlatformAdapter):
 
         return media_paths, media_types
 
-    async def _cache_media(self, kind: str, media: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    async def _cache_media(
+        self, kind: str, media: Dict[str, Any], *, chat_id: Optional[str] = None
+    ) -> Optional[Tuple[str, str]]:
         """Cache an inbound image/file/media reference to local storage."""
         if "base64" in media and media.get("base64"):
             try:
@@ -1613,7 +1620,7 @@ class WeComAdapter(BasePlatformAdapter):
                 return None
 
             if kind == "image":
-                return await self._cache_inbound_image(raw, "image/jpeg", source="base64")
+                return await self._cache_inbound_image(raw, "image/jpeg", source="base64", chat_id=chat_id)
 
             filename = unquote(str(media.get("filename") or media.get("name") or "wecom_file"))
             return await cache_document_from_bytes_async(raw, filename), mimetypes.guess_type(filename)[0] or "application/octet-stream"
@@ -1663,12 +1670,14 @@ class WeComAdapter(BasePlatformAdapter):
             # which misclassifies the cached image as a binary document
             # downstream (_derive_message_type keys off the mime). The bytes'
             # magic is authoritative for images — same as the base64 branch.
-            return await self._cache_inbound_image(raw, content_type, source=url)
+            return await self._cache_inbound_image(raw, content_type, source=url, chat_id=chat_id)
 
         filename = self._guess_filename(url, headers.get("content-disposition"), content_type)
         return await cache_document_from_bytes_async(raw, filename), content_type
 
-    async def _cache_inbound_image(self, raw: bytes, fallback_mime: str, *, source: str) -> Optional[Tuple[str, str]]:
+    async def _cache_inbound_image(
+        self, raw: bytes, fallback_mime: str, *, source: str, chat_id: Optional[str] = None
+    ) -> Optional[Tuple[str, str]]:
         """入站图片统一入口（base64 与 url+aeskey 两分支共用）：魔数定 ext →
         HEIC/HEIF 先转 JPEG → 落缓存并按 ext 推 mime。非图/坏字节走
         ValueError 拒收通道（warning + None），绝不冒充可用图送下游。"""
@@ -1679,10 +1688,37 @@ class WeComAdapter(BasePlatformAdapter):
                 # （仓内惯例见 base.py 的 to_thread；评审 I1）
                 raw = await asyncio.to_thread(self._convert_heic_to_jpeg, raw)
                 ext = ".jpg"
-            return await cache_image_from_bytes_async(raw, ext), self._mime_for_ext(ext, fallback=fallback_mime)
+            cached_path = await cache_image_from_bytes_async(raw, ext)
+            await self._archive_inbound_image(raw, ext, chat_id)
+            return cached_path, self._mime_for_ext(ext, fallback=fallback_mime)
         except ValueError as exc:
             logger.warning("[%s] Rejected non-image bytes from %s: %s", self.name, source, exc)
             return None
+
+    async def _archive_inbound_image(self, raw: bytes, ext: str, chat_id: Optional[str]) -> None:
+        """入站来图长期留存副本（2026-09-13）：cache/images 每小时按 24h TTL
+        清扫（base.py cleanup_image_cache），教师原图过期即丢、无法找回；本
+        副本目录刻意不注册进 run.py 的 MEDIA_CACHE_CLEANUPS，供事后审计与
+        检索。尽力而为：任何失败仅 warning，绝不影响入站主链路；chat_id 缺失
+        （直调路径/畸形回调）不归档，避免无从归因的孤儿文件。"""
+        if not chat_id:
+            return
+
+        def _write() -> str:
+            archive_dir = get_hermes_dir("cache/ltutor-incoming-images", "ltutor-incoming-images")
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            safe_chat = re.sub(r"[^A-Za-z0-9_.-]", "_", chat_id)[:64] or "unknown"
+            path = archive_dir / (
+                f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{safe_chat}_{uuid.uuid4().hex[:8]}{ext}"
+            )
+            path.write_bytes(raw)
+            return str(path)
+
+        try:
+            saved = await asyncio.to_thread(_write)
+            logger.info("[%s] Inbound image archived: %s", self.name, saved)
+        except Exception:
+            logger.warning("[%s] Inbound image archive failed (non-fatal)", self.name, exc_info=True)
 
     @staticmethod
     def _convert_heic_to_jpeg(data: bytes) -> bytes:
