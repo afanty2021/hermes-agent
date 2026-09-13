@@ -133,6 +133,8 @@ class WeComAdapter(WeComStreamMixin, WeComMediaMixin, ChatSendQueueMixin, BasePl
 
         self._bot_id = _setting("bot_id", env="WECOM_BOT_ID")
         self._secret = _setting("secret", env="WECOM_SECRET")        # zops vendor patch 0003: per-adapter inbound download cap (default = the 20MB absolute cap).
+        from plugins.platforms.wecom.media import ABSOLUTE_MAX_BYTES  # lazy: module __getattr__ is attribute-only
+
         self._inbound_max_bytes = int(extra.get("inbound_max_bytes") or ABSOLUTE_MAX_BYTES)
         self._ws_url = _setting("websocket_url", "websocketUrl", env="WECOM_WEBSOCKET_URL", default=DEFAULT_WS_URL) or DEFAULT_WS_URL
         self._dm_policy = _setting("dm_policy", env="WECOM_DM_POLICY", default="pairing").lower()

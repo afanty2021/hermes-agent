@@ -59,6 +59,8 @@ class TestWeComInboundImageExtension:
         encoded_key = quote(base64.b64encode(key).decode().rstrip("="), safe="")
 
         adapter = WeComAdapter.__new__(WeComAdapter)
+        adapter._inbound_max_bytes = 20 * 1024 * 1024  # zops patch 0003 (default cap)
+        adapter.platform = SimpleNamespace(value="wecom")  # name property reads self.platform.value
         stored = {}
 
         async def _download(url, max_bytes):
@@ -954,6 +956,7 @@ class TestInboundImageClassification:
     @pytest.mark.asyncio
     async def test_octet_stream_image_keeps_image_mime(self, monkeypatch):
         from plugins.platforms.wecom import adapter as adapter_mod
+        from plugins.platforms.wecom import media as media_mod
         from gateway.platforms.base import MessageType
 
         adapter = self._make_adapter()
@@ -971,7 +974,7 @@ class TestInboundImageClassification:
             assert data == jpeg_magic
             return "/cache/img_abc.jpg"
 
-        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+        monkeypatch.setattr(media_mod, "cache_image_from_bytes_async", fake_cache)
 
         path, mime = await adapter._cache_media(
             "image", {"url": "https://wecom.cdn/media/get"}
@@ -990,6 +993,7 @@ class TestInboundImageClassification:
         """A server that DOES send image/png must keep working after the
         magic-first change (PNG magic and the content type agree anyway)."""
         from plugins.platforms.wecom import adapter as adapter_mod
+        from plugins.platforms.wecom import media as media_mod
 
         adapter = self._make_adapter()
         png_magic = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
@@ -1003,7 +1007,7 @@ class TestInboundImageClassification:
             assert ext == ".png"
             return "/cache/img_abc.png"
 
-        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+        monkeypatch.setattr(media_mod, "cache_image_from_bytes_async", fake_cache)
 
         path, mime = await adapter._cache_media(
             "image", {"url": "https://wecom.cdn/media/get"}
@@ -1042,6 +1046,7 @@ class TestInboundImageClassification:
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
         from plugins.platforms.wecom import adapter as adapter_mod
+        from plugins.platforms.wecom import media as media_mod
 
         adapter = self._make_adapter()
         key = bytes(range(32))
@@ -1063,7 +1068,7 @@ class TestInboundImageClassification:
             assert data == plaintext, "cache must receive decrypted plaintext, not ciphertext"
             return "/cache/img_abc.png"
 
-        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+        monkeypatch.setattr(media_mod, "cache_image_from_bytes_async", fake_cache)
 
         path, mime = await adapter._cache_media(
             "image", {"url": "https://wecom.cdn/media/get", "aeskey": b64.b64encode(key).decode()}
@@ -1093,6 +1098,7 @@ class TestInboundImageClassification:
         from pillow_heif import register_heif_opener
 
         from plugins.platforms.wecom import adapter as adapter_mod
+        from plugins.platforms.wecom import media as media_mod
 
         register_heif_opener()
         buf = BytesIO()
@@ -1114,7 +1120,7 @@ class TestInboundImageClassification:
             captured["data"] = data
             return "/cache/img_abc.jpg"
 
-        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+        monkeypatch.setattr(media_mod, "cache_image_from_bytes_async", fake_cache)
 
         path, mime = await adapter._cache_media(
             "image", {"url": "https://wecom.cdn/media/get"}
@@ -1129,6 +1135,7 @@ class TestInboundImageClassification:
         """ftyp=heic 但解不开的坏字节：走 ValueError 拒收通道（warning+None），
         既不冒充可用图、也不进缓存。"""
         from plugins.platforms.wecom import adapter as adapter_mod
+        from plugins.platforms.wecom import media as media_mod
 
         adapter = self._make_adapter()
         corrupt = b"\x00\x00\x00\x18ftypheic" + b"\x9d" * 96
@@ -1141,7 +1148,7 @@ class TestInboundImageClassification:
         async def must_not_cache(data, ext):
             raise AssertionError("corrupt HEIC must not reach the cache")
 
-        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", must_not_cache)
+        monkeypatch.setattr(media_mod, "cache_image_from_bytes_async", must_not_cache)
 
         assert await adapter._cache_media(
             "image", {"url": "https://wecom.cdn/media/get"}
@@ -1159,6 +1166,7 @@ class TestInboundImageClassification:
         from pillow_heif import register_heif_opener
 
         from plugins.platforms.wecom import adapter as adapter_mod
+        from plugins.platforms.wecom import media as media_mod
 
         register_heif_opener()
         buf = BytesIO()
@@ -1173,7 +1181,7 @@ class TestInboundImageClassification:
             captured["data"] = data
             return "/cache/img_b64.jpg"
 
-        monkeypatch.setattr(adapter_mod, "cache_image_from_bytes_async", fake_cache)
+        monkeypatch.setattr(media_mod, "cache_image_from_bytes_async", fake_cache)
 
         path, mime = await adapter._cache_media(
             "image", {"base64": b64.b64encode(heic_bytes).decode()}

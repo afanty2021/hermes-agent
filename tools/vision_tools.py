@@ -608,6 +608,35 @@ def _needs_proactive_aux_resize(image_path: Path):
     return False, None
 
 
+async def _encode_for_aux_send(image_path: Path, mime_type, scale_out):
+    """Encode an image for the aux-LLM call behind the proactive resize gate.
+
+    Full-resolution-first was the 120 s-timeout root cause for mid-size
+    compressed photos; this routes oversized-but-under-hard-cap images
+    through ``_resize_image_for_vision`` under the byte budget BEFORE the
+    first upstream call.  Any resize failure falls back to the plain encode
+    (previous behavior) rather than blocking the call.
+    """
+    needs_resize, max_dimension = _needs_proactive_aux_resize(image_path)
+    if not needs_resize:
+        return await _run_encode_on_cpu_executor(
+            _image_to_base64_data_url, image_path, mime_type=mime_type)
+    resize_kwargs = {
+        "mime_type": mime_type,
+        "max_base64_bytes": _PROACTIVE_AUX_RESIZE_BASE64_BYTES,
+        "scale_out": scale_out,
+    }
+    if max_dimension:
+        resize_kwargs["max_dimension"] = max_dimension
+    try:
+        return await _run_encode_on_cpu_executor(
+            _resize_image_for_vision, image_path, **resize_kwargs)
+    except Exception as exc:
+        logger.warning("Proactive aux resize failed (%s); sending full-resolution instead", exc)
+        return await _run_encode_on_cpu_executor(
+            _image_to_base64_data_url, image_path, mime_type=mime_type)
+
+
 async def _resize_prepared(prepared: _PreparedImage, scale_info: dict, **kwargs) -> str:
     """Run :func:`_resize_image_for_vision` on the CPU executor for a prepared image."""
     return await _run_encode_on_cpu_executor(
@@ -808,21 +837,7 @@ async def vision_analyze_tool(
         # Offloaded to the bounded vision CPU executor so a fan-out of encodes
         # can't saturate every core and starve the event loop.
         _scale_info: dict = {}
-        needs_resize, gate_max_dimension = _needs_proactive_aux_resize(prepared.path)
-        if needs_resize:
-            gate_kwargs = {"max_base64_bytes": _PROACTIVE_AUX_RESIZE_BASE64_BYTES}
-            if gate_max_dimension:
-                gate_kwargs["max_dimension"] = gate_max_dimension
-            try:
-                image_data_url = await _resize_prepared(prepared, _scale_info, **gate_kwargs)
-            except Exception as _gate_exc:
-                logger.warning("Proactive aux resize failed (%s); sending full-resolution instead", _gate_exc)
-                image_data_url = await _run_encode_on_cpu_executor(
-                    _image_to_base64_data_url, prepared.path, mime_type=prepared.mime)
-        else:
-            logger.info("Converting image to base64...")
-            image_data_url = await _run_encode_on_cpu_executor(
-                _image_to_base64_data_url, prepared.path, mime_type=prepared.mime)
+        image_data_url = await _encode_for_aux_send(prepared.path, prepared.mime, _scale_info)
         logger.info("Image converted to base64 (%.1f KB)", len(image_data_url) / 1024)
         if len(image_data_url) > _MAX_BASE64_BYTES:
             image_data_url = await _resize_prepared(

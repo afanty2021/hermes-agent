@@ -715,6 +715,10 @@ class _RouteDecision:
     # transitions (recover/create) keep the full rewrite.
     metadata_only_save: bool = False
     needs_recover: bool = False
+    # True when recovery must NOT reopen the ended row (policy resets); a stale
+    # rebuild still tries recovery first (fork 47a901e8e1: a recoverable end_reason
+    # reopens the transcript and the stale_recovery hint flags are then ignored).
+    suppress_recover: bool = False
     # Auto-reset bookkeeping: reason (None = no auto-reset), whether the ended
     # session had activity, and its id (predecessor to end + continuity hint).
     reset_reason: Optional[str] = None
@@ -915,7 +919,11 @@ class SessionStore(
         decision = self._apply_route_checks(session_key, checks, force_new, touch_activity, now)
 
         # Phase 3 (no lock): recovery + create + save + DB ops.
-        if decision.needs_recover and decision.prev_session_id is None:
+        # Recovery gate is ``suppress_recover`` alone (fork 47a901e8e1 replay): policy resets
+        # suppress it, but a stale rebuild must still TRY recovery — a recoverable end_reason
+        # (agent_close/ws_orphan_reap) reopens the transcript and the stale_recovery hint flags
+        # are then ignored (they only land on a genuinely fresh session).
+        if decision.needs_recover and not decision.suppress_recover:
             self._route_recover(decision, session_key, source, now)
         create_kwargs = None
         if decision.entry is None:
@@ -971,6 +979,7 @@ class SessionStore(
                 # Honour an explicit suspension/reset decision instead of silently reopening via recovery.
                 if reset_reason:
                     decision.schedule_reset(reset_reason, entry, entry.last_prompt_tokens > 0)
+                    decision.suppress_recover = True
                 elif stale_hit:
                     # Fork (47a901e8e1): stale rebuild with no pending reset decision — the routing
                     # entry pointed at a session the state store already ended (e.g. the daily-reset

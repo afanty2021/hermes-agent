@@ -62,6 +62,7 @@ def _make_wecom_adapter(captured):
     adapter._pending_messages = {}
     adapter._message_handler = AsyncMock()
     adapter._dedup = SimpleNamespace(is_duplicate=lambda mid: False)
+    adapter._reply_req_ids = {}  # 20260913 upstream: msg_id -> req_id store written inline by _on_message
     adapter._group_chat_ids = set()
     adapter._group_policy = "open"
     adapter._is_group_allowed = lambda chat_id, sender_id: True
