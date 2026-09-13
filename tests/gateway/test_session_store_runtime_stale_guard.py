@@ -115,6 +115,10 @@ class TestRuntimeStaleGuard:
         assert result.session_id == "sid_stale"
         db.reopen_session.assert_called_once_with("sid_stale")
         db.create_session.assert_not_called()
+        # Recovery keeps the row live — the stale_recovery bookmark must not be
+        # promoted onto the reopened row (would force a fresh session next turn).
+        db.promote_to_session_reset.assert_not_called()
+        db.end_session.assert_not_called()
 
 
 class TestRecoveredSessionActivity:
@@ -287,3 +291,42 @@ class TestStaleRebuildCarriesContinuityHint:
         assert result.was_auto_reset is False
         assert result.auto_reset_reason != "stale_recovery"
         db.reopen_session.assert_called_once_with("sid_stale")
+        # Same DB-side contract as the in-memory flags: recovery succeeds, so the
+        # stale_recovery bookmark must never reach promote/end (C2 regression net —
+        # a MagicMock db silently no-ops promote unless asserted).
+        db.promote_to_session_reset.assert_not_called()
+        db.end_session.assert_not_called()
+
+
+class TestStaleRecoveryRealSQLite:
+    """Real-SQLite variant of the stale-recovery flow: the mock-based tests above cannot
+    see ``promote_to_session_reset``'s WHERE clause, which is exactly what re-ended the
+    reopened row before the bookmark fix (ended_at IS NULL matches a just-reopened row)."""
+
+    def test_recovered_stale_row_stays_live_across_consecutive_turns(self, tmp_path):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        store = _make_store_with_db(tmp_path, db)
+        source = _source()
+
+        # Production write pair: create the row through the store, then close it with a
+        # recoverable end_reason while sessions.json keeps routing to it (the incident
+        # shape: #61220/#61993/#63539 — agent_close row + stale routing entry).
+        first = store.get_or_create_session(source)
+        db.end_session(first.session_id, "agent_close")
+        key = store._generate_session_key(source)
+        store._entries[key] = _make_entry(key, first.session_id)
+
+        # Turn 2 (morning): stale hit → recovery reopens the SAME session.
+        second = store.get_or_create_session(source)
+        assert second.session_id == first.session_id
+        row = db.get_session(first.session_id)
+        assert row["end_reason"] is None
+
+        # Turn 3: the recovered session must keep routing — pre-fix, promote re-ended the
+        # row as 'stale_recovery' (unrecoverable) and this call forced a fresh session.
+        third = store.get_or_create_session(source)
+        assert third.session_id == first.session_id
+        assert db.get_session(first.session_id)["end_reason"] is None
+        db.close()

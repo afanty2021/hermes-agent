@@ -1012,6 +1012,15 @@ class SessionStore(
         with self._lock:
             decision.entry = self._entries.setdefault(session_key, recovered)
         decision.needs_save = True
+        # Recovery won: the session continues on the reopened row, so the stale_recovery
+        # bookmark must be voided here. Phase 3 feeds prev_session_id to
+        # _finish_route_transition unconditionally, and promote_to_session_reset's WHERE
+        # (ended_at IS NULL OR recoverable end_reason) matches the row we just reopened —
+        # leaving the bookmark re-ends the rescued session and forces a fresh one on the
+        # next turn. Fork 47a901e8e1: the flags are ignored when recovery succeeds.
+        decision.reset_reason = None
+        decision.reset_had_activity = False
+        decision.prev_session_id = None
 
     def _route_create(
         self, decision: _RouteDecision, session_key: str, source: SessionSource, now: datetime,
