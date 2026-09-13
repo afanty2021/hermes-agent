@@ -10,12 +10,14 @@ import logging
 import mimetypes
 import re
 import uuid
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 from gateway.platforms.base import SendResult, cache_document_from_bytes_async, cache_image_from_bytes_async
+from hermes_constants import get_hermes_dir
 
 logger = logging.getLogger("plugins.platforms.wecom.adapter")
 
@@ -55,6 +57,10 @@ class WeComMediaMixin:
     """Media helpers mixed into WeComAdapter (uses its transport, req_id cache and stream registry)."""
 
     async def _extract_media(self, body: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+        # chat_id / 发送者 userid 只用于来图留存副本的文件名归因（见
+        # _archive_inbound_image）；两者都缺时传 None，副本跳过不归档。
+        sender = body.get("from") if isinstance(body.get("from"), dict) else {}
+        chat_id = str(body.get("chatid") or sender.get("userid") or "").strip() or None
         refs: List[Tuple[str, Dict[str, Any]]] = []
         msgtype = str(body.get("msgtype") or "").lower()
 
@@ -79,10 +85,12 @@ class WeComMediaMixin:
         quote_type = str(quote.get("msgtype") or "").lower()
         if quote_type in ("image", "file"):
             _ref(quote_type, quote)
-        cached = [c for c in [await self._cache_media(kind, ref) for kind, ref in refs] if c]
+        cached = [c for c in [await self._cache_media(kind, ref, chat_id=chat_id) for kind, ref in refs] if c]
         return [c[0] for c in cached], [c[1] for c in cached]
 
-    async def _cache_media(self, kind: str, media: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    async def _cache_media(
+        self, kind: str, media: Dict[str, Any], *, chat_id: Optional[str] = None
+    ) -> Optional[Tuple[str, str]]:
         """Cache an inbound image/file reference (inline base64 or URL) to local storage."""
         if media.get("base64"):
             try:
@@ -91,7 +99,7 @@ class WeComMediaMixin:
                 logger.debug("[%s] Failed to decode %s base64 media: %s", self.name, kind, exc)
                 return None
             filename = unquote(str(media.get("filename") or media.get("name") or "wecom_file"))  # zops patch 0005
-            return await self._store_media(kind, raw, self._detect_image_ext(raw), "", filename, mimetypes.guess_type(filename)[0] or "application/octet-stream", "")
+            return await self._store_media(kind, raw, self._detect_image_ext(raw), "", filename, mimetypes.guess_type(filename)[0] or "application/octet-stream", "", chat_id=chat_id)
         # 会话存档 format guard: smart robots use url+aeskey; an sdkfileid means the WeCom API or
         # config is off (chat-archive SDK territory) — say so once and skip instead of silently
         # dropping the attachment.
@@ -126,9 +134,9 @@ class WeComMediaMixin:
         # Images: never forward the CDN's generic octet-stream label — downstream classifiers
         # reject non-image MIMEs; derive it from the resolved extension instead.
         image_mime = content_type if content_type.startswith("image/") else ""
-        return await self._store_media(kind, raw, ext, image_mime, self._guess_filename(url, headers.get("content-disposition"), content_type), content_type, f" from {url}")
+        return await self._store_media(kind, raw, ext, image_mime, self._guess_filename(url, headers.get("content-disposition"), content_type), content_type, f" from {url}", chat_id=chat_id)
 
-    async def _store_media(self, kind, raw, ext, image_mime, filename, doc_mime, origin) -> Optional[Tuple[str, str]]:
+    async def _store_media(self, kind, raw, ext, image_mime, filename, doc_mime, origin, *, chat_id: Optional[str] = None) -> Optional[Tuple[str, str]]:
         """Cache bytes as an image (``kind == "image"``) or a document; returns (path, mime).
 
         Fork: HEIC/HEIF input (iPhone camera default) is transcoded to JPEG first — the magic
@@ -143,10 +151,37 @@ class WeComMediaMixin:
                 # loop never blocks.
                 raw = await asyncio.to_thread(self._convert_heic_to_jpeg, raw)
                 ext = ".jpg"
-            return await cache_image_from_bytes_async(raw, ext), image_mime or self._mime_for_ext(ext, fallback="image/jpeg")
+            cached_path = await cache_image_from_bytes_async(raw, ext)
+            await self._archive_inbound_image(raw, ext, chat_id)
+            return cached_path, image_mime or self._mime_for_ext(ext, fallback="image/jpeg")
         except ValueError as exc:
             logger.warning("[%s] Rejected non-image bytes%s: %s", self.name, origin, exc)
             return None
+
+    async def _archive_inbound_image(self, raw: bytes, ext: str, chat_id: Optional[str]) -> None:
+        """入站来图长期留存副本（2026-09-13）：cache/images 每小时按 24h TTL
+        清扫（base.py cleanup_image_cache），教师原图过期即丢、无法找回；本
+        副本目录刻意不注册进 run.py 的 MEDIA_CACHE_CLEANUPS，供事后审计与
+        检索。尽力而为：任何失败仅 warning，绝不影响入站主链路；chat_id 缺失
+        （直调路径/畸形回调）不归档，避免无从归因的孤儿文件。"""
+        if not chat_id:
+            return
+
+        def _write() -> str:
+            archive_dir = get_hermes_dir("cache/ltutor-incoming-images", "ltutor-incoming-images")
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            safe_chat = re.sub(r"[^A-Za-z0-9_.-]", "_", chat_id)[:64] or "unknown"
+            path = archive_dir / (
+                f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{safe_chat}_{uuid.uuid4().hex[:8]}{ext}"
+            )
+            path.write_bytes(raw)
+            return str(path)
+
+        try:
+            saved = await asyncio.to_thread(_write)
+            logger.info("[%s] Inbound image archived: %s", self.name, saved)
+        except Exception:
+            logger.warning("[%s] Inbound image archive failed (non-fatal)", self.name, exc_info=True)
 
     @staticmethod
     def _convert_heic_to_jpeg(data: bytes) -> bytes:

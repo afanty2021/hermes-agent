@@ -1213,6 +1213,92 @@ class TestInboundImageClassification:
         back = Image.open(BytesIO(out))
         assert back.size == (30, 60), "orientation=6 must transpose pixels (60x30 → 30x60)"
 
+    @pytest.mark.asyncio
+    async def test_inbound_image_archived_with_chat_id(self, monkeypatch, tmp_path):
+        """入站来图长期留存副本：cache/images 每小时按 24h TTL 清扫（Sherry
+        09-10/09-11 两图已实证被清），_store_media 须在
+        ltutor-incoming-images 另落一份带 chat_id/时间戳的副本，且不进
+        MEDIA_CACHE_CLEANUPS（目录常驻）。"""
+        import base64 as b64
+
+        from plugins.platforms.wecom import media as media_mod
+
+        adapter = self._make_adapter()
+        archive = tmp_path / "archive"
+        monkeypatch.setattr(
+            media_mod, "get_hermes_dir", lambda new, old, home=None: archive
+        )
+
+        async def fake_cache(data, ext):
+            return "/cache/img_arch.jpg"
+
+        monkeypatch.setattr(media_mod, "cache_image_from_bytes_async", fake_cache)
+
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+        path, mime = await adapter._cache_media(
+            "image", {"base64": b64.b64encode(jpeg).decode()}, chat_id="Sherry"
+        )
+
+        assert (path, mime) == ("/cache/img_arch.jpg", "image/jpeg")
+        files = list(archive.iterdir())
+        assert len(files) == 1, "归档副本应恰好一份"
+        assert "_Sherry_" in files[0].name and files[0].name.endswith(".jpg")
+        assert files[0].read_bytes() == jpeg
+
+    @pytest.mark.asyncio
+    async def test_archive_failure_does_not_break_inbound(self, monkeypatch):
+        """副本尽力而为：归档侧任何异常（磁盘满/目录不可写）只降级为不归档，
+        入站主链路 path/mime 照常返回。"""
+        import base64 as b64
+
+        from plugins.platforms.wecom import media as media_mod
+
+        adapter = self._make_adapter()
+
+        def broken_dir(new, old, home=None):
+            raise RuntimeError("simulated archive failure")
+
+        monkeypatch.setattr(media_mod, "get_hermes_dir", broken_dir)
+
+        async def fake_cache(data, ext):
+            return "/cache/img_ok.jpg"
+
+        monkeypatch.setattr(media_mod, "cache_image_from_bytes_async", fake_cache)
+
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+        result = await adapter._cache_media(
+            "image", {"base64": b64.b64encode(jpeg).decode()}, chat_id="Sherry"
+        )
+        assert result == ("/cache/img_ok.jpg", "image/jpeg")
+
+    @pytest.mark.asyncio
+    async def test_extract_media_derives_chat_id_from_body(self, monkeypatch):
+        """归因穿线：_extract_media 从回调 body 取 chatid（缺则退 from.userid），
+        原样传给 _cache_media——取不到时传 None（副本跳过，不留孤儿归档）。"""
+        from plugins.platforms.wecom import adapter as adapter_mod
+
+        adapter = self._make_adapter()
+        captured = {}
+
+        async def fake_cache_media(kind, media, *, chat_id=None):
+            captured["chat_id"] = chat_id
+            return None
+
+        monkeypatch.setattr(adapter, "_cache_media", fake_cache_media)
+
+        await adapter._extract_media(
+            {"msgtype": "image", "chatid": "SherryChat", "image": {"base64": "x"}}
+        )
+        assert captured["chat_id"] == "SherryChat"
+
+        await adapter._extract_media(
+            {"msgtype": "image", "from": {"userid": "Khaki"}, "image": {"base64": "x"}}
+        )
+        assert captured["chat_id"] == "Khaki"
+
+        await adapter._extract_media({"msgtype": "image", "image": {"base64": "x"}})
+        assert captured["chat_id"] is None
+
 
 # === NATIVE STREAMING (msgtype: stream) ===
 
