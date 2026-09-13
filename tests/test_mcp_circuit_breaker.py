@@ -21,6 +21,7 @@ from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, ErrorData, TextContent
 
 from tools import mcp_tool
+from tools import mcp_tool_discovery, mcp_tool_handlers, mcp_tool_loop
 
 
 SERVER = "llm-wiki-training"
@@ -55,17 +56,20 @@ class _FakeServer:
 
 
 def _install(monkeypatch, outcome):
+    # Post-20260913-merge seam map: the handler path resolves each dependency from its own
+    # module (mcp_tool_handlers calls _trust_gate_check in-module, discovery/loop via their
+    # modules); breaker STATE still lives in tools.mcp_tool (handlers read it through _core).
     server = _FakeServer(outcome)
-    monkeypatch.setattr(mcp_tool, "_trust_gate_check", lambda s, t: None)
-    monkeypatch.setattr(mcp_tool, "_get_connected_server_for_call", lambda s: server)
+    monkeypatch.setattr(mcp_tool_handlers, "_trust_gate_check", lambda s, t: None)
+    monkeypatch.setattr(mcp_tool_discovery, "_get_connected_server_for_call", lambda s: server)
 
     def _run(coro_or_factory, timeout=None):
         # Real _run_on_mcp_loop accepts a coroutine or a zero-arg factory.
         coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
         return asyncio.run(coro)
 
-    monkeypatch.setattr(mcp_tool, "_run_on_mcp_loop", _run)
-    return mcp_tool._make_tool_handler(SERVER, TOOL, 5.0)
+    monkeypatch.setattr(mcp_tool_loop, "_run_on_mcp_loop", _run)
+    return mcp_tool_handlers._make_tool_handler(SERVER, TOOL, 5.0)
 
 
 IDENTITY_REFUSAL = McpError(ErrorData(
