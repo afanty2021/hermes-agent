@@ -362,7 +362,12 @@ class WeComAdapter(WeComStreamMixin, WeComMediaMixin, ChatSendQueueMixin, BasePl
                 logger.warning("[%s] Kicked by server (another WS connection established). Suppressing reconnect to avoid mutual kicking. Check for duplicate gateway instances.", self.name)
                 self._running = False
         elif cmd != APP_CMD_PING:
-            logger.info("[%s] Unrouted websocket payload dropped: cmd=%r req_id=%s body_keys=%s", self.name, cmd or "(empty)", req_id or "(none)", list(body_dict.keys()) if body_dict is not None else None)
+            if not cmd and str(req_id or "").startswith("ping-"):
+                # Keepalive frames carry no cmd and a ping-* req_id (~every 30s); logging them
+                # at INFO flooded gateway.log (~500KB/day). Genuine unrouted payloads stay at INFO.
+                logger.debug("[%s] Keepalive websocket ping ignored: req_id=%s", self.name, req_id or "(none)")
+            else:
+                logger.info("[%s] Unrouted websocket payload dropped: cmd=%r req_id=%s body_keys=%s", self.name, cmd or "(empty)", req_id or "(none)", list(body_dict.keys()) if body_dict is not None else None)
 
     def _fail_pending_responses(self, exc: Exception) -> None:
         for req_id, future in list(self._pending_responses.items()):

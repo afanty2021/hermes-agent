@@ -1992,3 +1992,48 @@ class TestFinalFrameAckTimeoutSemantics:
                 {"msgtype": "stream", "stream": {"id": "stream_x", "content": "x", "finish": True}},
                 is_final=True,
             )
+
+
+class TestUnroutedPayloadLogging:
+    @pytest.mark.asyncio
+    async def test_keepalive_ping_frame_is_not_logged_at_info(self, caplog):
+        """WeCom keepalive frames (no cmd, ping-* req_id) arrive ~every 30s; at INFO they
+        flooded gateway.log (~500KB/day). They log at DEBUG; genuine unrouted payloads stay INFO."""
+        import logging
+
+        from plugins.platforms.wecom.adapter import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._on_message = AsyncMock()
+
+        with caplog.at_level(logging.DEBUG):
+            await adapter._dispatch_payload({"cmd": "", "headers": {"req_id": "ping-abc123"}, "body": None})
+            await adapter._dispatch_payload({"headers": {"req_id": "ping-def456"}})
+
+        unrouted_infos = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "Unrouted websocket payload dropped" in r.getMessage()
+        ]
+        assert unrouted_infos == []
+        keepalive_debugs = [
+            r for r in caplog.records
+            if r.levelno == logging.DEBUG and "Keepalive websocket ping ignored" in r.getMessage()
+        ]
+        assert len(keepalive_debugs) == 2
+
+    @pytest.mark.asyncio
+    async def test_genuinely_unrouted_payload_still_logs_info(self, caplog):
+        import logging
+
+        from plugins.platforms.wecom.adapter import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._on_message = AsyncMock()
+
+        with caplog.at_level(logging.INFO):
+            await adapter._dispatch_payload({"cmd": "mystery_cmd", "headers": {"req_id": "req-9"}, "body": {"k": "v"}})
+
+        assert any(
+            r.levelno == logging.INFO and "Unrouted websocket payload dropped" in r.getMessage()
+            for r in caplog.records
+        )

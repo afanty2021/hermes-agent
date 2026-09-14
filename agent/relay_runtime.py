@@ -773,6 +773,13 @@ class RelayHostRegistry:
                 return host
             try:
                 host = RelayRuntime(profile_key=key)
+            except ModuleNotFoundError as exc:
+                # The optional relay binding is absent. This path fires per conversation key
+                # (the Noop host is cached per key, but keys vary), so it must stay at debug —
+                # otherwise every event replays the failure at WARNING (~110/month live).
+                # The root cause is reported once by ``_load_nemo_relay``.
+                logger.debug("Relay unavailable (optional binding missing): %s", exc)
+                host = NoopRelayRuntime(profile_key=key, reason=str(exc))
             except Exception as exc:
                 logger.warning("Hermes Relay runtime initialization failed", exc_info=True)
                 host = NoopRelayRuntime(profile_key=key, reason=str(exc))
@@ -1208,9 +1215,22 @@ def current_profile_key() -> str:
     return _PROFILE_KEY_CACHE.get(str(home)) or _PROFILE_KEY_CACHE.setdefault(str(home), str(home.resolve()))
 
 
+_NEMO_RELAY_IMPORT_ERROR: ModuleNotFoundError | None = None
+
+
 def _load_nemo_relay() -> Any:
     """Load the binding only when a producer or consumer needs Relay."""
-    return importlib.import_module("nemo_relay")
+    global _NEMO_RELAY_IMPORT_ERROR
+    if _NEMO_RELAY_IMPORT_ERROR is not None:
+        raise _NEMO_RELAY_IMPORT_ERROR
+    try:
+        return importlib.import_module("nemo_relay")
+    except ModuleNotFoundError as exc:
+        # Optional binding: report the root cause once, without a traceback; later calls
+        # re-raise the cached error so callers keep their Noop-fallback behavior unchanged.
+        _NEMO_RELAY_IMPORT_ERROR = exc
+        logger.warning("Optional binding 'nemo_relay' is not installed; Relay features stay disabled (further init failures log at debug)")
+        raise
 
 
 def _configured_plugin_inputs(relay: Any) -> tuple[dict[str, Any], list[Any]] | None:
