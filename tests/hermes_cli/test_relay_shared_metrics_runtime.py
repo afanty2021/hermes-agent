@@ -982,7 +982,8 @@ def test_core_runtime_is_fail_open_without_a_published_binding(monkeypatch, capl
         tool_name="terminal",
         args={"command": "true"},
     ) == {"command": "true"}
-    assert "Hermes Relay runtime initialization failed" in caplog.text
+    assert "Optional binding 'nemo_relay' is not installed" in caplog.text
+    assert "Hermes Relay runtime initialization failed" not in caplog.text
     relay_runtime._reset_for_tests()
 
 

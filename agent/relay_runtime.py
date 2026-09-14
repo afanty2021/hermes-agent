@@ -1277,11 +1277,13 @@ def _session_id(event: dict[str, Any]) -> str:
 
 def _reset_for_tests() -> None:
     """Reset all profile-scoped Relay hosts for isolated tests."""
+    global _NEMO_RELAY_IMPORT_ERROR
     with SESSION_COORDINATOR._active_turns_lock:
         SESSION_COORDINATOR._active_turns.clear()
     HOST_REGISTRY.shutdown_all()
     _PLUGIN_CONFIGURATION.reset_for_tests()
     _PROFILE_KEY_CACHE.clear()
+    _NEMO_RELAY_IMPORT_ERROR = None
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
