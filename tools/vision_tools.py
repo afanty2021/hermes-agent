@@ -714,12 +714,23 @@ def _media_messages(user_prompt: str, part_type: str, data_url: str) -> list:
         {"type": "text", "text": user_prompt}, {"type": part_type, part_type: {"url": data_url}}]}]
 
 
-# Aux-LLM error classification: first matching hint set wins (billing → capability → size/format).
+# Aux-LLM error classification: first matching hint set wins (billing → timeout → capability → size/format).
 _BILLING_HINTS = ("402", "insufficient", "payment required", "credits", "billing")
+# Upstream aux timeouts: the model saw nothing wrong with the image, so the retry must change
+# shape — an identical re-send burns the full budget again (observed: 3×180s identical retries
+# in one turn because the generic fallback text gave the model no guidance).
+_TIMEOUT_HINTS = ("timed out", "timeout", "timed_out")
 _IMAGE_ERROR_RULES = (
     (_BILLING_HINTS,
      "Insufficient credits or payment required. Please top up your "
      "API provider account and try again. Error: {e}"),
+    (_TIMEOUT_HINTS,
+     "The vision model timed out before finishing ({e}). The image itself is "
+     "fine — the request was just too long-running to retry as-is. Retry in "
+     "smaller pieces: call again with a `region` crop (original-image pixel "
+     "coordinates [x1, y1, x2, y2]) to analyze one section at a time — each "
+     "smaller answer finishes well within the limit. If the user is waiting, "
+     "acknowledge the delay first, then follow up with the result."),
     (("does not support", "not support image", "content_policy", "multimodal",
       "unrecognized request argument", "image input"),
      "{model} does not support vision or our request was not "
@@ -732,6 +743,10 @@ _IMAGE_ERROR_RULES = (
 )
 _VIDEO_ERROR_RULES = (
     (_BILLING_HINTS, _IMAGE_ERROR_RULES[0][1]),
+    (_TIMEOUT_HINTS,
+     "The video model timed out before finishing ({e}). Tell the user the "
+     "analysis is running long, then retry once; if it times out again, ask "
+     "for a shorter clip instead of retrying a third time."),
     (("does not support", "not support video", "content_policy", "multimodal",
       "unrecognized request argument", "video input", "video_url"),
      "The model does not support video analysis or the request was "
