@@ -614,7 +614,7 @@ class TestAutoAppendWhitelistMembership:
 
     def test_pptx_wire_name_whitelisted(self):
         from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
-        from tools.mcp_tool import mcp_prefixed_tool_name
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
 
         assert (
             mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_pptx")
@@ -664,7 +664,7 @@ class TestAutoAppendWhitelistMembership:
 
     def test_auto_append_collects_pptx_media_on_real_dispatch_name(self):
         from gateway.run import _collect_auto_append_media_tags
-        from tools.mcp_tool import mcp_prefixed_tool_name
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
 
         messages = self._tool_round_messages(
             mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_pptx"))
