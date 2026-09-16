@@ -1359,7 +1359,7 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "text_to_speech",
     "text_to_speech_tool",
     "image_generate",
-    # fork: LT 师训听力音频/思维导图/学案海报 MCP 工具（mp3/png 产物经 MEDIA: 标签投递）。
+    # fork: LT 师训听力音频/思维导图/学案海报/课件 PPT MCP 工具（mp3/png/pptx 产物经 MEDIA: 标签投递）。
     # ⚠ 线名必须是「净化后派发名」：mcp_prefixed_tool_name 把服务器名连字符统一换
     # 下划线——写配置侧服务器名（连字符形态）永不匹配，兜底即死代码（2026-09-10
     # 评审 C1）。行为级测试见
@@ -1367,6 +1367,7 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "mcp__llm_wiki_training__teacher_tutor_listening_audio",
     "mcp__llm_wiki_training__teacher_tutor_mindmap",
     "mcp__llm_wiki_training__teacher_tutor_worksheet",
+    "mcp__llm_wiki_training__teacher_tutor_pptx",
 }
 
 # Replay-tail sanitization lives in agent/replay_cleanup.py so every resume surface shares one implementation.
