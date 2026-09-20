@@ -222,9 +222,12 @@ def test_call_tool_handler_rebuilds_configured_server_transport(
             assert call_count["n"] == 1
         else:
             assert parsed == {"error" if application_error else "result": "reconnected"}
-            # The recovered result is the tool's real answer either way; an application error is
-            # still one breaker strike (#10447), a success resets the counter.
-            assert mcp_tool._server_error_counts.get("resumed", 0) == (1 if application_error else 0)
+            # The recovered result is the tool's real answer either way. Fork divergence
+            # (pinned by tests/test_mcp_circuit_breaker.py): application-level errors do
+            # NOT burn a breaker strike — only transport/availability failures do. An
+            # application error triggers the session reset instead of punishing the
+            # server for having answered; upstream (#10447) burns one strike here.
+            assert mcp_tool._server_error_counts.get("resumed", 0) == 0
             assert call_count["n"] == 2
         assert routes == [expected_route, expected_route]
         assert configs == [transport_config, transport_config]
