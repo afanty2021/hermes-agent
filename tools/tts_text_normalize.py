@@ -50,12 +50,21 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE)
 _VARIATION_SELECTOR_RE = re.compile("[︎️]")
 
+# 括注舞台指示（"(停顿)"、"（稍作停顿）"、"[停顿一下]"、"pause"）是写给朗诵者的标注，
+# 语音引擎会照字面念出来——TTS 输入里整块删除。保守起见只匹配含停顿语义的短括注，
+# 其余括号内容（注音、缩写展开等）可能是要读的，不动。
+_TTS_STAGE_DIRECTION_RE = re.compile(
+    r"\s*[（\[(]\s*(?:[^（）()\[\]]{0,6}停[^（）()\[\]]{0,8}?|pausing|pause|silence)\s*[）\])]\s*",
+    flags=re.IGNORECASE)
+
 
 def strip_markdown_for_tts(text: str) -> str:
     """Strip Markdown/Telegram formatting while preserving readable words."""
     if not text:
         return ""
     text = html.unescape(str(text))
+    text = _TTS_STAGE_DIRECTION_RE.sub("，", text)
+    text = re.sub(r"[，,]{2,}", "，", text)
     text = _MD_CODE_BLOCK_RE.sub(" ", text)
     text = _MD_IMAGE_RE.sub(lambda m: f" {m.group(1)} " if m.group(1) else " ", text)
     text = _MD_LINK_RE.sub(r"\1", text)
