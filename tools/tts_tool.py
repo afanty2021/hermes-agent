@@ -269,13 +269,17 @@ def _session_platform() -> tuple:
 
 
 def _resolve_output_base(
-    output_path: Optional[str], provider: str, command_provider_config: Optional[Dict[str, Any]], want_opus: bool,
+    output_path: Optional[str], output_dir: Optional[str], provider: str,
+    command_provider_config: Optional[Dict[str, Any]], want_opus: bool,
 ) -> tuple:
     """Pick the output file -> ``(Path, None)`` or ``(None, error_json)``.
 
     A caller path is rejected on ``..`` traversal (bug or prompt-injection; absolute is fine) and
     on protected credential/system locations. Default ``<audio cache>/tts_<timestamp>.<ext>``: the
-    command format, ``.ogg`` for native-Opus providers on Opus platforms, else ``.mp3``."""
+    command format, ``.ogg`` for native-Opus providers on Opus platforms, else ``.mp3``.
+    ``output_dir`` (no explicit filename) keeps the ``tts_<timestamp>.<ext>`` naming inside the
+    given directory — used when the user explicitly wants the audio file, so it stays outside the
+    voice-bubble cache path."""
     if output_path:
         from tools.path_security import has_traversal_component
         if has_traversal_component(output_path):
@@ -285,11 +289,18 @@ def _resolve_output_base(
         file_path = Path(output_path).expanduser()
         if command_provider_config is not None:
             file_path = _configured_command_tts_output_path(file_path, command_provider_config)
-        from agent.file_safety import is_write_approval_required, is_write_denied
-        if is_write_denied(str(file_path)) or is_write_approval_required(str(file_path)):
+    elif output_dir:
+        from tools.path_security import has_traversal_component
+        if has_traversal_component(output_dir):
             return None, _error_json(
-                f"output_path targets a protected credential or system path: "
-                f"{file_path}. Choose a normal audio output location.")
+                f"output_dir contains '..' traversal component: {output_dir}. "
+                "Use an absolute path without '..'.")
+        if command_provider_config is not None:
+            ext = _get_command_tts_output_format(command_provider_config)
+        else:
+            ext = "ogg" if want_opus and provider in _NATIVE_OPUS_PROVIDERS else "mp3"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_path = Path(output_dir).expanduser() / f"tts_{timestamp}.{ext}"
     else:
         if command_provider_config is not None:
             ext = _get_command_tts_output_format(command_provider_config)
@@ -297,6 +308,11 @@ def _resolve_output_base(
             ext = "ogg" if want_opus and provider in _NATIVE_OPUS_PROVIDERS else "mp3"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         file_path = Path(_default_output_dir()) / f"tts_{timestamp}.{ext}"
+    from agent.file_safety import is_write_approval_required, is_write_denied
+    if is_write_denied(str(file_path)) or is_write_approval_required(str(file_path)):
+        return None, _error_json(
+            f"Output path targets a protected credential or system path: "
+            f"{file_path}. Choose a normal audio output location.")
     file_path.parent.mkdir(parents=True, exist_ok=True)
     return file_path, None
 
@@ -398,13 +414,16 @@ def _synthesize_chunks(chunks: List[str], base_path: Path, generated_artifacts: 
 
 
 def text_to_speech_tool(
-    text: str, output_path: Optional[str] = None, speed: Optional[float] = None,
-    instructions: Optional[str] = None, provider: Optional[str] = None) -> str:
+    text: str, output_path: Optional[str] = None, output_dir: Optional[str] = None,
+    speed: Optional[float] = None, instructions: Optional[str] = None,
+    provider: Optional[str] = None) -> str:
     """Convert text to speech with long-form chunking; returns the JSON result envelope.
 
     Text is normalized, split into provider-safe chunks (never silently truncated), synthesized
     sequentially, then packed against the platform's upload limit: a failed combine keeps the
-    separate valid files and no over-limit artifact is ever returned."""
+    separate valid files and no over-limit artifact is ever returned. ``output_dir`` saves the
+    audio FILE there in its original format — delivered as a file attachment, never a voice
+    bubble — for requests that explicitly want a downloadable mp3/wav rather than a voice reply."""
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
     try:  # shared cleaner: markdown, emoji, think blocks, verifier footer, units, newlines
@@ -426,7 +445,7 @@ def text_to_speech_tool(
     platform, want_opus = _session_platform()
     delivery_profile = _resolve_audio_delivery_profile(platform, tts_config)
     base_path, error = _resolve_output_base(
-        output_path, provider, command_provider_config, want_opus)
+        output_path, output_dir, provider, command_provider_config, want_opus)
     if error:
         return error
     generated_artifacts: set[str] = set()
@@ -444,7 +463,7 @@ def text_to_speech_tool(
             logger.info("TTS audio saved: %s (%s bytes, provider: %s)", path, f"{os.path.getsize(path):,}", provider)
         return json.dumps({
             "success": True, "file_path": final_paths[0], "file_paths": final_paths,
-            "media_tag": _media_tag(final_paths, voice_compatible),
+            "media_tag": _media_tag(final_paths, voice_compatible and not output_dir),
             "provider": chunk_results[0].get("provider", provider), "voice_compatible": voice_compatible,
             "chunk_count": len(chunks), "delivery_file_count": len(final_paths),
             "combined_chunks": bool(combined_chunks),
@@ -529,7 +548,7 @@ def _tts_schema_overrides() -> dict:
 
 TTS_SCHEMA = {
     "name": "text_to_speech",
-    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio. Compatible providers render as a voice bubble on Telegram; otherwise audio is sent as a regular attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
+    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio. Compatible providers render as a voice bubble on Telegram; otherwise audio is sent as a regular attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected. DEFAULT delivery is a voice bubble — when the user asks for the audio as a FILE (mp3/wav 文件/音频文件), you MUST pass output_dir, otherwise they cannot get the file.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -540,6 +559,16 @@ TTS_SCHEMA = {
             "output_path": {
                 "type": "string",
                 "description": _output_path_description("the profile HERMES_HOME")
+            },
+            "output_dir": {
+                "type": "string",
+                "description": (
+                    "REQUIRED when the user asks for the audio as a file (mp3/wav 文件/音频文件) "
+                    "instead of a voice reply. Directory to save the audio FILE into (absolute "
+                    "path, no filename needed). The file keeps its original format and is "
+                    "delivered as a file attachment, never converted to a voice bubble. "
+                    "Ignored when output_path is set."
+                )
             },
             "speed": {
                 "type": "number",
@@ -575,7 +604,7 @@ registry.register(
     schema=TTS_SCHEMA,
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
-        **{k: args.get(k) for k in ("output_path", "speed", "instructions", "provider")}),
+        **{k: args.get(k) for k in ("output_path", "output_dir", "speed", "instructions", "provider")}),
     check_fn=check_tts_requirements,
     emoji="🔊",
     dynamic_schema_overrides=_tts_schema_overrides)
