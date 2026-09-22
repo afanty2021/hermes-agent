@@ -8,7 +8,10 @@ import base64
 import hashlib
 import logging
 import mimetypes
+import os
 import re
+import subprocess
+import tempfile
 import uuid
 from datetime import datetime
 from io import BytesIO
@@ -354,8 +357,46 @@ class WeComMediaMixin:
         resolved_name = file_name or local_path.name
         return local_path.read_bytes(), self._normalize_content_type("", resolved_name), resolved_name
 
+    @staticmethod
+    def _convert_audio_to_amr(data: bytes, src_suffix: str) -> Optional[bytes]:
+        """任意音频 -> AMR-NB(8kHz 单声道 12.2kbps,企微语音唯一接受格式)。用 ffmpeg-full
+        (brew,自带 libopencore_amrnb);路径可用 WECOM_AMR_FFMPEG 覆盖。失败返回 None,
+        调用方回落到文件卡片降级路径。"""
+        ffmpeg = os.environ.get("WECOM_AMR_FFMPEG", "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg")
+        if not Path(ffmpeg).exists():
+            logger.warning("[wecom] AMR transcode skipped: ffmpeg not found at %s", ffmpeg)
+            return None
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                src = Path(td) / f"src{src_suffix}"
+                dst = Path(td) / "out.amr"
+                src.write_bytes(data)
+                proc = subprocess.run(
+                    [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
+                     "-ar", "8000", "-ac", "1", "-c:a", "libopencore_amrnb", "-b:a", "12.2k", str(dst)],
+                    capture_output=True, timeout=120)
+                if proc.returncode == 0 and dst.is_file() and dst.stat().st_size > 0:
+                    return dst.read_bytes()
+                logger.warning("[wecom] AMR transcode failed: %s", proc.stderr.decode(errors="replace")[:200])
+        except Exception as exc:
+            logger.warning("[wecom] AMR transcode error: %s", exc)
+        return None
+
     async def _prepare_outbound_media(self, media_source: str, file_name: Optional[str] = None) -> Dict[str, Any]:
         data, content_type, resolved_name = await self._load_outbound_media(media_source, file_name=file_name)
+        # Fork 2026-09-21: TTS 语音回复(mp3/wav)此前被判非 AMR 而降级成文件卡片。企微语音气泡
+        # 仅收 AMR——把 TTS 流水线的产物(text_to_speech 写入 cache/audio/tts_*)转码成
+        # AMR-NB(8kHz 单声道 12.2kbps),ffmpeg-full 自带 libopencore_amrnb。范围刻意收窄到
+        # TTS 缓存路径:用户明确索要的 mp3 等其他音频保持原格式走文件卡片,不做有损转码。
+        # 转码失败保持原字节走原降级路径,绝不因转码阻断主链路。
+        source_posix = unquote(parsed.path if (parsed := urlparse(str(media_source).strip())).scheme == "file" else str(media_source).strip()).replace("\\", "/")
+        if (content_type.startswith("audio/") and "amr" not in content_type
+                and "/cache/audio/tts_" in source_posix):
+            converted = await asyncio.to_thread(
+                self._convert_audio_to_amr, data, Path(resolved_name).suffix or ".mp3")
+            if converted:
+                data, content_type = converted, "audio/amr"
+                resolved_name = str(Path(resolved_name).with_suffix(".amr"))
         detected_type = self._detect_wecom_media_type(content_type)
         return {"data": data, "content_type": content_type, "file_name": resolved_name, "detected_type": detected_type, **self._apply_file_size_limits(len(data), detected_type, content_type)}
 
