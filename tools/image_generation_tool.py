@@ -417,12 +417,14 @@ def image_generate_tool(
     num_inference_steps: Optional[int] = None, guidance_scale: Optional[float] = None,
     num_images: Optional[int] = None, output_format: Optional[str] = None,
     seed: Optional[int] = None, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None) -> str:
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
+    width: Optional[int] = None, height: Optional[int] = None) -> str:
     """Generate (or, with source images + an ``edit_endpoint`` model, edit) an image via FAL.
 
     Extra kwargs are overrides filtered per-model via ``supports`` / ``edit_supports`` (dropped
-    silently so callers survive model switches). Returns JSON ``{"success", "image", "modality",
-    "error", "error_type"}``.
+    silently so callers survive model switches). ``width``/``height`` are accepted for provider-
+    dispatch parity and ignored: FAL sizes derive from the ``aspect_ratio`` presets. Returns
+    JSON ``{"success", "image", "modality", "error", "error_type"}``.
     """
     model_id, meta = _resolve_fal_model()
     refs = reference_image_urls if isinstance(reference_image_urls, (list, tuple)) else []
@@ -596,7 +598,8 @@ def _provider_result(result, contract_error: str) -> str:
     return json.dumps(result)
 
 
-def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model=None) -> Dict[str, Any]:
+def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model=None,
+                         width=None, height=None) -> Dict[str, Any]:
     """Add the optional ``provider.generate(**kwargs)`` args in place (edit args only when supplied)."""
     if model:
         kwargs["model"] = model
@@ -609,12 +612,17 @@ def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model
             kwargs["reference_image_urls"] = norm_refs
     if upscale is not None:
         kwargs["upscale"] = bool(upscale)
+    if isinstance(width, int) and width > 0:
+        kwargs["width"] = width
+    if isinstance(height, int) and height > 0:
+        kwargs["height"] = height
     return kwargs
 
 
 def _dispatch_to_plugin_provider(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None):
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
+    width: Optional[int] = None, height: Optional[int] = None):
     """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL
     (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``."""
     configured = _plugin_provider_name()
@@ -640,7 +648,7 @@ def _dispatch_to_plugin_provider(
     kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
     try:
         _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
-                             model=_read_configured_image_model())
+                             model=_read_configured_image_model(), width=width, height=height)
         result = provider.generate(**kwargs)
     except Exception as exc:
         # A TypeError from generate() predating image_url support (third-party plugin not yet
@@ -691,7 +699,8 @@ def _managed_model_plugin() -> Optional[tuple]:
 
 def _maybe_route_managed_model(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None) -> Optional[str]:
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
+    width: Optional[int] = None, height: Optional[int] = None) -> Optional[str]:
     """JSON result from the Krea or Portal gateway the stored model belongs to, or ``None`` to fall
     through to FAL.
 
@@ -719,7 +728,8 @@ def _maybe_route_managed_model(
             f"available. Pick another model via `hermes tools` → Image Generation.", "provider_not_registered")
     kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio, "model": model_id}
     try:
-        _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale)
+        _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
+                             width=width, height=height)
         result = provider.generate(**kwargs)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Managed %s routing failed: %s", plugin_name, exc)
@@ -759,6 +769,7 @@ def _handle_image_generate(args, **kw):
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
     upscale = args.get("upscale")
+    raw_width, raw_height = args.get("width"), args.get("height")
     task_id = kw.get("task_id")
     # Confinement chokepoint BEFORE any dispatch: every route receives sandbox-confined bytes.
     image_url, reference_image_urls, confine_error = _confine_source_images(
@@ -768,7 +779,9 @@ def _handle_image_generate(args, **kw):
     # Order matters: explicit plugin provider, then the model-driven managed gateways (Krea /
     # Portal — only under the "nous"/unset selection, so BYO/direct FAL stays untouched), then FAL.
     sources = dict(image_url=image_url, reference_image_urls=reference_image_urls,
-                   upscale=upscale if isinstance(upscale, bool) else None)
+                   upscale=upscale if isinstance(upscale, bool) else None,
+                   width=int(raw_width) if isinstance(raw_width, (int, float)) and raw_width else None,
+                   height=int(raw_height) if isinstance(raw_height, (int, float)) and raw_height else None)
     raw = None
     for route in (_dispatch_to_plugin_provider, _maybe_route_managed_model, image_generate_tool):
         raw = route(prompt, aspect_ratio, **sources)
@@ -815,6 +828,8 @@ def _active_image_capabilities() -> Dict[str, Any]:
                     info["max_reference_images"] = int(caps["max_reference_images"])
                 # Plugins opt in explicitly; absent = no upscale param.
                 info["supports_upscale"] = bool(caps.get("supports_upscale"))
+                # Same opt-in pattern for custom pixel sizes (width/height params).
+                info["supports_custom_size"] = bool(caps.get("supports_custom_size"))
                 return info
         except Exception:  # noqa: BLE001
             pass
@@ -848,6 +863,24 @@ _UPSCALE_PARAM = {
         "(rendered text, faces) — use only when resolution matters more "
         "than fidelity."
     ),
+}
+
+_CUSTOM_SIZE_PARAMS = {
+    "width": {
+        "type": "integer",
+        "description": (
+            "Custom image width in pixels, snapped to multiples of 32. "
+            "Omit width/height to use the aspect_ratio presets. Larger "
+            "sizes take proportionally longer to render."
+        ),
+    },
+    "height": {
+        "type": "integer",
+        "description": (
+            "Custom image height in pixels, snapped to multiples of 32. "
+            "Omit width/height to use the aspect_ratio presets."
+        ),
+    },
 }
 
 
@@ -884,6 +917,9 @@ def _build_dynamic_image_schema() -> Dict[str, Any]:
         edit_clause = " (text-to-image only — the active model cannot edit existing images)"
     if info.get("supports_upscale"):
         properties["upscale"] = _UPSCALE_PARAM
+    if info.get("supports_custom_size"):
+        properties["width"] = _CUSTOM_SIZE_PARAMS["width"]
+        properties["height"] = _CUSTOM_SIZE_PARAMS["height"]
     return {"description": base_desc.format(edit_clause=edit_clause),
             "parameters": {"type": "object", "properties": properties, "required": ["prompt"]}}
 
