@@ -9,6 +9,7 @@ model (multimodal tool-result envelope) or are described by the auxiliary vision
 import base64
 import asyncio
 import json
+import math
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import logging
@@ -362,7 +363,11 @@ def _parse_boxes_payload(text: Optional[str]) -> Optional[list]:
             continue
         bbox = item.get("bbox")
         if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4
-                and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in bbox)):
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and math.isfinite(v) for v in bbox)):
+            # NaN/Inf rejected here so the reply degrades to boxes_parse_failed
+            # (with its retry hint) instead of crashing the coordinate mapping
+            # into a generic tool error.
             continue
         boxes.append({"label": str(item.get("label") or item.get("name") or "region"),
                       "bbox": [float(v) for v in bbox]})
@@ -408,7 +413,8 @@ def _convert_normalized_boxes(boxes: list, scale_info: Optional[dict],
                           "bbox": [px[0] + offset_x, py[0] + offset_y, px[1] + offset_x, py[1] + offset_y]})
     if offset_x or offset_y:
         space = (f"full-image pixels, [x1, y1, x2, y2], origin top-left "
-                 f"(analyzed-region offset ({offset_x}, {offset_y}) already applied)")
+                 f"(analyzed-region offset ({offset_x}, {offset_y}) already applied; "
+                 "image_size is the analyzed region's size, not the full image's)")
     else:
         space = "original-image pixels, [x1, y1, x2, y2], origin top-left"
     return converted, space, [plane_w, plane_h], [offset_x, offset_y]

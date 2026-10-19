@@ -82,6 +82,13 @@ class TestParseBoxesPayload:
         # Entries present but every one malformed is still a parse failure.
         assert _parse_boxes_payload('[{"bbox": [1, 2]}, "junk"]') is None
 
+    def test_non_finite_coordinates_rejected(self):
+        # json.loads accepts NaN/Infinity literals; round(nan) would crash the
+        # coordinate mapping into a generic tool error, so they must fail the
+        # parse (degrading to the boxes_parse_failed retry hint instead).
+        assert _parse_boxes_payload('[{"label": "a", "bbox": [NaN, 0, 100, 100]}]') is None
+        assert _parse_boxes_payload('[{"label": "a", "bbox": [0, 0, Infinity, 100]}]') is None
+
 
 # ---------------------------------------------------------------------------
 # _convert_normalized_boxes — 0-1000 space -> original-image pixels
@@ -117,6 +124,8 @@ class TestConvertNormalizedBoxes:
         # not tell consumers to add it again (a double add erases printed content).
         assert "already applied" in space
         assert "full-image pixels" in space
+        # The mapping plane is the cropped file, so image_size is the region's size.
+        assert "image_size is the analyzed region's size" in space
 
     def test_out_of_range_coordinates_clamp_to_plane(self):
         # Models occasionally emit coords beyond 0-1000; a negative pixel index would
@@ -162,6 +171,14 @@ class TestFinalizeBoxesResult:
         result = json.loads(_finalize_boxes_result(result_json, captured))
         assert result["boxes_parse_failed"] is True
         assert "It is a cat." in result["analysis"]
+        assert "plainer question" in result["analysis"]
+
+    def test_non_finite_reply_degrades_to_parse_failed_not_crash(self):
+        result_json = json.dumps({"success": True, "analysis": "x"})
+        raw = '[{"label": "a", "bbox": [NaN, 0, 100, 100]}]'
+        captured = {"raw": raw, "scale_info": None, "crop_offset": None, "seen_size": (100, 100)}
+        result = json.loads(_finalize_boxes_result(result_json, captured))
+        assert result["boxes_parse_failed"] is True
         assert "plainer question" in result["analysis"]
 
     def test_empty_reply_maps_to_empty_boxes_not_failure(self):
