@@ -569,8 +569,6 @@ class TestLongRunningNotificationOwnership:
         assert runner._should_emit_long_running_notification("sess", agent, executor_task=None) is False
 
 
-
-
 # ---------------------------------------------------------------------------
 # Heartbeat interval: send-only platforms back off, editable ones stay steady
 # ---------------------------------------------------------------------------
