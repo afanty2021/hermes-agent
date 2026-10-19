@@ -252,6 +252,19 @@ class TestStreamingPerPlatform:
 
         assert resolve_display_setting({}, "wecom", "streaming") is True
 
+    def test_wecom_defaults_keep_heartbeats_alive(self):
+        """WeCom's native stream dies after ~330s and the adapter cannot edit,
+        so a long turn would otherwise go completely silent (a real 77-minute
+        turn produced zero feedback). Only wecom is flipped out of the LOW
+        tier; its siblings keep the quiet defaults."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "wecom", "long_running_notifications") is True
+        assert resolve_display_setting({}, "wecom", "busy_ack_detail") is True
+        assert resolve_display_setting({}, "signal", "long_running_notifications") is False
+        assert resolve_display_setting({}, "weixin", "long_running_notifications") is False
+        assert resolve_display_setting({}, "wecom_callback", "long_running_notifications") is False
+
     def test_wecom_callback_default_remains_off(self):
         """The legacy callback adapter has no stream protocol — keep off."""
         from gateway.display_config import resolve_display_setting

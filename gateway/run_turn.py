@@ -4105,8 +4105,16 @@ class GatewayTurnMixin:
         if not _notify_adapter:
             return
         _heartbeat_msg_id: Optional[str] = None
+        # Send-only platforms (SUPPORTS_MESSAGE_EDITING False — WeCom, iMessage inboxes) receive
+        # every heartbeat as a NEW message, so their interval backs off each round instead of
+        # staying put: a one-hour turn costs ~7 bubbles (3m, 4.8m, 7.7m, then every 10m), not twenty.
+        # The cap never shortens a user-configured interval below what they asked for.
+        _HEARTBEAT_MAX_INTERVAL = max(600.0, float(_NOTIFY_INTERVAL))
+        _adapter_can_edit = bool(getattr(_notify_adapter, "SUPPORTS_MESSAGE_EDITING", True))
+        _interval_backs_off = not _adapter_can_edit
+        _heartbeat_interval = float(_NOTIFY_INTERVAL)
         while True:
-            await asyncio.sleep(_NOTIFY_INTERVAL)
+            await asyncio.sleep(_heartbeat_interval)
             if not self._should_emit_long_running_notification(
                 session_key, agent_holder[0], _executor_task_holder[0]
             ):
@@ -4135,7 +4143,9 @@ class GatewayTurnMixin:
             )
             try:
                 _notify_res = None
-                if _heartbeat_msg_id:
+                # A send-only adapter has no edit API — skip straight to the fresh send
+                # instead of attempting an edit that can only fail.
+                if _heartbeat_msg_id and _adapter_can_edit:
                     try:
                         _notify_res = await _notify_adapter.edit_message(source.chat_id, _heartbeat_msg_id, _heartbeat_text)
                     except Exception as _ee:
@@ -4158,6 +4168,8 @@ class GatewayTurnMixin:
                             turn_ctx._cleanup_msg_ids.append(_heartbeat_msg_id)
             except Exception as _ne:
                 logger.debug("Long-running notification error: %s", _ne)
+            if _interval_backs_off:
+                _heartbeat_interval = min(_heartbeat_interval * 1.6, _HEARTBEAT_MAX_INTERVAL)
 
     async def _run_agent_inner(
         self, message: str, context_prompt: str, history: List[Dict[str, Any]],

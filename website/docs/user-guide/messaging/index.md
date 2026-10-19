@@ -868,6 +868,20 @@ display:
       long_running_notifications: false
 ```
 
+### WeCom long-turn heartbeats
+
+WeCom cannot edit messages, and its native streaming view ends after a few minutes — without a heartbeat, a long turn is completely silent and reads as "the bot died". WeCom therefore keeps `long_running_notifications` **on** despite sitting in the non-editable tier: every few minutes you get a fresh "⏳ Working — N min — iteration N/M, running: tool" message until the turn answers.
+
+Because each heartbeat is a new message (no edit-in-place), the interval backs off — the first bubble arrives after ~3 minutes, then the gaps grow to a 10-minute ceiling, so an hour-long turn costs about seven bubbles, throttled further by WeCom's per-chat send budget. Turn them off (or quiet the iteration detail) per platform:
+
+```yaml
+display:
+  platforms:
+    wecom:
+      long_running_notifications: false   # back to total silence on long turns
+      busy_ack_detail: false              # keep heartbeats, drop the "iteration N/M" suffix
+```
+
 ### Warning and error notifications (opt-in suppression)
 
 Automatic warning and error notifications are shown by default. To suppress

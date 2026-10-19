@@ -64,8 +64,12 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     "photon": _TIER_LOW,  # permanent-message iMessage inboxes (no edit)
     "bluebubbles": _TIER_LOW,
     "weixin": _TIER_LOW,
-    # Non-editable, but its native "stream" msgtype gives a typing animation + cumulative updates.
-    "wecom": {**_TIER_LOW, "streaming": True},
+    # Non-editable tier, but its native "stream" msgtype dies after ~330s, and it cannot edit:
+    # without the heartbeat a long turn goes completely silent, which reads as "the bot died".
+    # Heartbeats are fresh sends here — run_turn.py backs their interval off so the volume stays
+    # low, and WeCom's per-chat send queue absorbs them.
+    "wecom": {**_TIER_LOW, "streaming": True,
+              "long_running_notifications": True, "busy_ack_detail": True},
     "wecom_callback": _TIER_LOW,
     "dingtalk": _TIER_LOW,
     "email": _TIER_MINIMAL,

@@ -569,3 +569,168 @@ class TestLongRunningNotificationOwnership:
         assert runner._should_emit_long_running_notification("sess", agent, executor_task=None) is False
 
 
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat interval: send-only platforms back off, editable ones stay steady
+# ---------------------------------------------------------------------------
+
+class TestLongRunningHeartbeatInterval:
+    """WeCom and other non-editable adapters receive every heartbeat as a NEW
+    message, so run_turn backs their interval off each round (x1.6, capped) while
+    editable adapters keep the configured cadence. The cap never shortens a
+    user-configured interval below what they asked for. Context: a WeCom turn ran
+    77 minutes with zero feedback because the tier default disabled the heartbeat
+    entirely; flipping it on without backoff would have spammed instead."""
+
+    @staticmethod
+    def _make_runner(agent):
+        from gateway.run import GatewayRunner
+
+        runner = object.__new__(GatewayRunner)
+        runner._running_agents = {"sess": agent}
+        runner._draining = runner._restart_requested = False
+        return runner
+
+    @staticmethod
+    def _make_ctx(agent):
+        from types import SimpleNamespace
+        from gateway.turn_context import TurnContext
+
+        ctx = TurnContext(source=SimpleNamespace(chat_id="c", platform="wecom"), session_key="sess")
+        ctx.agent_holder[0] = agent
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_send_only_adapter_backs_off_to_cap(self, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+        from gateway.run import GatewayRunner
+
+        monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "400")
+        sleeps = []
+
+        async def _fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+        agent = MagicMock()
+        runner = self._make_runner(agent)
+        adapter = MagicMock()
+        adapter.SUPPORTS_MESSAGE_EDITING = False
+        adapter.edit_message = AsyncMock(
+            side_effect=AssertionError("send-only adapters have no edit API"))
+        sends = []
+
+        async def _send(*a, **k):
+            sends.append(1)
+            if len(sends) == 3:
+                runner._restart_requested = True  # stop the loop after the third bubble
+            return SimpleNamespace(success=True, message_id=f"hb-{len(sends)}")
+
+        adapter.send = AsyncMock(side_effect=_send)
+        runner._delivery_adapter_for = lambda source: adapter
+        runner._agent_activity_summary = staticmethod(lambda a: None)
+        disp = MagicMock()
+        disp._display_surface_mode.return_value = "on"
+        disp.resolve_display_setting.return_value = False
+
+        await asyncio.wait_for(
+            GatewayRunner._run_agent_notify_long_running(runner, disp, self._make_ctx(agent), [None]), 5)
+
+        assert sleeps[0] == 400.0
+        assert sleeps[1] == 600.0  # 400 * 1.6 = 640, capped
+        assert all(s == 600.0 for s in sleeps[1:])
+        # A send-only adapter must skip the doomed edit attempt entirely.
+        assert adapter.edit_message.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_long_configured_interval_is_never_shortened(self, monkeypatch):
+        """The 600s backoff cap is a floor for DEFAULTS, not a ceiling over the
+        user's setting: 900s configured means every heartbeat waits >= 900s."""
+        import asyncio
+        from types import SimpleNamespace
+        from gateway.run import GatewayRunner
+
+        monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "900")
+        sleeps = []
+
+        async def _fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+        agent = MagicMock()
+        runner = self._make_runner(agent)
+        adapter = MagicMock()
+        adapter.SUPPORTS_MESSAGE_EDITING = False
+        sends = []
+
+        async def _send(*a, **k):
+            sends.append(1)
+            if len(sends) == 3:
+                runner._restart_requested = True
+            return SimpleNamespace(success=True, message_id=f"hb-{len(sends)}")
+
+        adapter.send = AsyncMock(side_effect=_send)
+        runner._delivery_adapter_for = lambda source: adapter
+        runner._agent_activity_summary = staticmethod(lambda a: None)
+        disp = MagicMock()
+        disp._display_surface_mode.return_value = "on"
+        disp.resolve_display_setting.return_value = False
+
+        await asyncio.wait_for(
+            GatewayRunner._run_agent_notify_long_running(runner, disp, self._make_ctx(agent), [None]), 5)
+
+        assert len(sleeps) >= 3
+        assert all(s == 900.0 for s in sleeps)  # 900 * 1.6 capped at max(600, 900)
+
+    @pytest.mark.asyncio
+    async def test_editable_adapter_keeps_steady_interval(self, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+        from gateway.run import GatewayRunner
+
+        monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "400")
+        sleeps = []
+
+        async def _fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+
+        agent = MagicMock()
+        runner = self._make_runner(agent)
+        adapter = MagicMock()
+        adapter.SUPPORTS_MESSAGE_EDITING = True
+        edits = []
+
+        async def _edit(*a, **k):
+            edits.append(1)
+            if len(edits) == 2:
+                runner._restart_requested = True  # stop after two edited ticks
+            return SimpleNamespace(success=True, message_id="m")
+
+        adapter.edit_message = AsyncMock(side_effect=_edit)
+        sends = []
+
+        async def _send(*a, **k):
+            sends.append(1)
+            if len(sends) == 2:
+                runner._restart_requested = True
+            return SimpleNamespace(success=True, message_id=f"hb-{len(sends)}")
+
+        adapter.send = AsyncMock(side_effect=_send)
+        runner._delivery_adapter_for = lambda source: adapter
+        runner._agent_activity_summary = staticmethod(lambda a: None)
+        disp = MagicMock()
+        disp._display_surface_mode.return_value = "on"
+        disp.resolve_display_setting.return_value = False
+
+        await asyncio.wait_for(
+            GatewayRunner._run_agent_notify_long_running(runner, disp, self._make_ctx(agent), [None]), 5)
+
+        assert len(sleeps) >= 3
+        assert all(s == 400.0 for s in sleeps)  # no backoff on an editable adapter
+        assert adapter.send.await_count == 1  # first bubble only; later ticks edit it
