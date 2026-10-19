@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, NamedTuple, Optional
@@ -47,6 +48,7 @@ from tools.vision_tools_history_budget import (
 from tools.vision_tools_image_prep import (
     _VISION_MAX_VALIDATED_AGGREGATE_PIXELS,
     _VISION_MAX_VALIDATED_FRAME_COUNT,
+    _bake_exif_orientation,
     _crop_image_region,
     _determine_mime_type,
     _image_exceeds_dimension,
@@ -313,6 +315,136 @@ def _build_scale_note(scale_info: Optional[dict], crop_offset: Optional[dict]) -
     return " ".join(parts) if parts else None
 
 
+# --- grounding (``boxes``) mode --------------------------------------------
+# vision_analyze(boxes=True) trades prose for machine-readable regions: an erase
+# or crop pipeline needs coordinates, and "describe what you see" replies cannot
+# drive one. The aux model replies in a scale-agnostic 0-1000 normalized space
+# (it never knows the wire image's true size), and the tool maps the boxes back
+# onto the pre-downscale, pre-crop image before returning them.
+
+_GROUNDING_COORD_MAX = 1000
+
+
+def _grounding_prompt(question: str) -> str:
+    """Locator instruction wrapping the caller's request for boxes mode."""
+    return (
+        "You are a precise visual locator. Locate every region of the image that "
+        "matches the request. Reply with ONLY a JSON array — no prose, no code "
+        'fences — one element per region: {"label": "<short name>", "bbox": '
+        "[x1, y1, x2, y2]}. Coordinates are integers in the 0-1000 space of the "
+        "image as you see it (0,0 = top-left, 1000,1000 = bottom-right); boxes "
+        "are tight around the target. If nothing matches, reply []. Request:\n\n"
+        + question)
+
+
+def _parse_boxes_payload(text: Optional[str]) -> Optional[list]:
+    """``[{label, bbox:[4 numbers]}]`` from a vision reply (fenced, embedded or bare);
+    ``None`` when no array of well-formed boxes is present."""
+    if not text:
+        return None
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if fence:
+        candidate = fence.group(1)
+    else:
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end <= start:
+            return None
+        candidate = text[start:end + 1]
+    try:
+        data = json.loads(candidate)
+    except ValueError:
+        return None
+    if not isinstance(data, list):
+        return None
+    boxes = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        bbox = item.get("bbox")
+        if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in bbox)):
+            continue
+        boxes.append({"label": str(item.get("label") or item.get("name") or "region"),
+                      "bbox": [float(v) for v in bbox]})
+    # [] is a legitimate "nothing matched" reply, not a parse failure — only a payload
+    # with no well-formed array at all is (data non-empty but every entry malformed).
+    if boxes or not data:
+        return boxes
+    return None
+
+
+def _image_pixel_size(path: Path) -> Optional[tuple]:
+    """(width, height) or None without Pillow / on an unreadable file."""
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            return img.size
+    except Exception:
+        return None
+
+
+def _convert_normalized_boxes(boxes: list, scale_info: Optional[dict],
+                              crop_offset: Optional[dict], seen_size: Optional[tuple]) -> tuple:
+    """Map 0-1000 normalized boxes onto the pre-downscale image plane (adding the region
+    offset when a crop was applied). Returns ``(boxes, coordinate_space, image_size, offset)``;
+    boxes pass through unchanged (with a stated space) when the plane size is unknowable."""
+    if scale_info:
+        plane_w, plane_h = int(scale_info["orig_width"]), int(scale_info["orig_height"])
+    elif seen_size:
+        plane_w, plane_h = int(seen_size[0]), int(seen_size[1])
+    else:
+        return (boxes, f"0-{_GROUNDING_COORD_MAX} normalized against the image as sent",
+                None, [0, 0])
+    offset_x = int((crop_offset or {}).get("x", 0))
+    offset_y = int((crop_offset or {}).get("y", 0))
+    converted = []
+    for box in boxes:
+        x1, y1, x2, y2 = box["bbox"]
+        # Clamp inside the plane: models occasionally reply slightly out-of-range coords,
+        # and a negative pixel index wraps to the far side of the image in downstream ops.
+        px = sorted(min(max(round(v / _GROUNDING_COORD_MAX * plane_w), 0), plane_w) for v in (x1, x2))
+        py = sorted(min(max(round(v / _GROUNDING_COORD_MAX * plane_h), 0), plane_h) for v in (y1, y2))
+        converted.append({"label": box["label"],
+                          "bbox": [px[0] + offset_x, py[0] + offset_y, px[1] + offset_x, py[1] + offset_y]})
+    if offset_x or offset_y:
+        space = (f"full-image pixels, [x1, y1, x2, y2], origin top-left "
+                 f"(analyzed-region offset ({offset_x}, {offset_y}) already applied)")
+    else:
+        space = "original-image pixels, [x1, y1, x2, y2], origin top-left"
+    return converted, space, [plane_w, plane_h], [offset_x, offset_y]
+
+
+def _finalize_boxes_result(result_json: str, captured: dict) -> str:
+    """Augment a successful ``_run_analysis`` result with parsed, coordinate-mapped boxes.
+    Unparseable replies keep the raw analysis plus a retry hint; error results pass through."""
+    try:
+        result = json.loads(result_json)
+    except ValueError:
+        return result_json
+    if not isinstance(result, dict) or not result.get("success"):
+        return result_json
+    boxes = _parse_boxes_payload(captured.get("raw") or "")
+    if boxes is None:
+        result["boxes_parse_failed"] = True
+        result["analysis"] = (
+            f"{result.get('analysis', '')}\n\nThe vision model did not return a parseable "
+            'JSON array of {"label", "bbox"} regions. Re-call with a plainer question that '
+            'names the target (e.g. "all handwritten ink strokes").')
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    converted, space, image_size, offset = _convert_normalized_boxes(
+        boxes, captured.get("scale_info"), captured.get("crop_offset"), captured.get("seen_size"))
+    result["boxes"] = converted
+    result["coordinate_space"] = space
+    result["offset"] = offset
+    if image_size:
+        result["image_size"] = image_size
+    # The aux reply IS the boxes payload here; the "[scale note]" prefix _run_analysis
+    # added describes the pre-mapping plane and would mislead after the mapping above.
+    result["analysis"] = captured.get("raw") or result.get("analysis", "")
+    result.pop("scale_note", None)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
 def _import_pillow_for_resize():
     """Return ``PIL.Image`` or None (Pillow is a lazy-installable soft dependency). ``prompt=False``:
     a blocking input() deadlocks the CLI where prompt_toolkit owns stdin; the install is already
@@ -497,7 +629,7 @@ def _should_use_native_vision_fast_path() -> bool:
 
 def _build_native_vision_tool_result(
     image_url: str, question: str, image_data_url: str, image_size_bytes: int,
-    scale_note: Optional[str] = None,
+    scale_note: Optional[str] = None, boxes: bool = False,
 ) -> Dict[str, Any]:
     """Multimodal tool-result envelope. The text part is intentionally minimal (the model already
     has the question); ``text_summary`` is the fallback for providers without multimodal tool results."""
@@ -506,6 +638,11 @@ def _build_native_vision_tool_result(
         "Use your built-in vision to answer the user.")
     if isinstance(question, str) and question.strip():
         text_part += f"\n\nQuestion: {question.strip()}"
+    if boxes:
+        text_part += (
+            "\n\nThe caller wants machine-readable regions: reply with ONLY a JSON "
+            'array of {"label", "bbox": [x1, y1, x2, y2]} in ORIGINAL-image pixel '
+            "coordinates (apply the scale note below), or [] if nothing matches.")
     if scale_note:
         text_part += f"\n\nNote: {scale_note}"
     return {
@@ -563,6 +700,13 @@ async def _prepare_image(
         if normalized_path != path:
             _unlink_quietly(path)
             path = normalized_path
+            size_bytes = path.stat().st_size
+        # EXIF orientation is baked before crop/downscale so the crop offset, scale
+        # info and any boxes coordinates all refer to the same (display) plane.
+        upright_path, mime = await asyncio.to_thread(_bake_exif_orientation, path, mime)
+        if upright_path != path:
+            _unlink_quietly(path)
+            path = upright_path
             size_bytes = path.stat().st_size
         if validate_decode:
             decode_error = await _run_encode_on_cpu_executor(
@@ -653,9 +797,12 @@ async def _resize_prepared(prepared: _PreparedImage, scale_info: dict, **kwargs)
 
 async def _vision_analyze_native(
     image_url: str, question: str, task_id: Optional[str] = None, region: Optional[list] = None,
+    boxes: bool = False,
 ) -> Any:
     """Fast path for vision-capable main models: a ``_multimodal`` envelope dict on success,
-    or a JSON error string (the normal tool-result contract) on failure."""
+    or a JSON error string (the normal tool-result contract) on failure. ``boxes`` asks the
+    main model — which IS the vision model here — to reply with a JSON region array; the
+    envelope carries the output contract, and the model maps coordinates itself."""
     if not isinstance(image_url, str) or not image_url.strip():
         return tool_error("image_url is required", success=False)
     already_native = _native_turn_duplicate(image_url, region)
@@ -700,7 +847,8 @@ async def _vision_analyze_native(
         return _build_native_vision_tool_result(
             image_url=image_url, question=question, image_data_url=image_data_url,
             image_size_bytes=prepared.size_bytes,
-            scale_note=_build_scale_note(_scale_info or None, prepared.crop_offset or None))
+            scale_note=_build_scale_note(_scale_info or None, prepared.crop_offset or None),
+            boxes=boxes)
     except Exception as exc:
         logger.warning("Native vision fast path failed: %s", exc)
         return tool_error(f"Native vision failed: {exc}", success=False)
@@ -861,9 +1009,13 @@ async def _run_analysis(
 
 async def vision_analyze_tool(
     image_url: str, user_prompt: str, model: str = None,
-    task_id: Optional[str] = None, region: Optional[list] = None) -> str:
+    task_id: Optional[str] = None, region: Optional[list] = None, boxes: bool = False) -> str:
     """Describe an image (URL, local path, data: URL) with the auxiliary vision LLM. ``user_prompt``
-    is pre-formatted by the caller. Temp images live under $HERMES_HOME/cache/vision/."""
+    is pre-formatted by the caller. Temp images live under $HERMES_HOME/cache/vision/.
+    ``boxes=True``: grounding mode — the reply is parsed as a ``{label, bbox}`` array and the
+    coordinates are mapped back onto the pre-downscale image (``_convert_normalized_boxes``)."""
+    captured: dict = {}
+
     async def stage(prompt: str, debug_call_data: dict, temp_paths: list) -> tuple:
         prepared = await _prepare_image(image_url, task_id, region, validate_decode=False)
         temp_paths.append(prepared.path)
@@ -882,7 +1034,14 @@ async def vision_analyze_tool(
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 raise ValueError(_too_large_message(image_data_url))
         debug_call_data["image_size_bytes"] = prepared.size_bytes
-        messages = _media_messages(prompt, "image_url", image_data_url)
+        captured["scale_info"] = dict(_scale_info) if _scale_info else None
+        captured["crop_offset"] = dict(prepared.crop_offset) if prepared.crop_offset else None
+        # The pixel-size probe is only consumed by boxes mode's passthrough mapping.
+        captured["seen_size"] = (
+            None if (captured["scale_info"] or not boxes) else await _run_encode_on_cpu_executor(
+                _image_pixel_size, prepared.path))
+        wire_prompt = _grounding_prompt(prompt) if boxes else prompt
+        messages = _media_messages(wire_prompt, "image_url", image_data_url)
         logger.info("Processing image with vision model...")
         call_kwargs = _aux_call_kwargs(messages, model, 120.0)
         _load_auxiliary_client()
@@ -900,8 +1059,10 @@ async def vision_analyze_tool(
             response = await async_call_llm(**call_kwargs)
         analysis = await _call_vision_llm(
             call_kwargs, "Vision LLM returned empty content, retrying once", response)
+        captured["raw"] = analysis
         return analysis, _build_scale_note(_scale_info or None, prepared.crop_offset or None)
-    return await _run_analysis("image", image_url, user_prompt, model, stage)
+    result_json = await _run_analysis("image", image_url, user_prompt, model, stage)
+    return _finalize_boxes_result(result_json, captured) if boxes else result_json
 
 
 def check_video_requirements() -> bool:
@@ -969,6 +1130,20 @@ VISION_ANALYZE_SCHEMA = {
                     "re-call with a region to zoom into small text or fine "
                     "detail."
                 )
+            },
+            "boxes": {
+                "type": "boolean",
+                "description": (
+                    "Set true to locate regions instead of describing them: the "
+                    "reply carries a `boxes` array of {label, bbox:[x1,y1,x2,y2]} "
+                    "in original-image pixel coordinates, ready to feed an "
+                    "erase/crop script (when the aux vision model answers, the "
+                    "result includes mapped `boxes`, `image_size` and "
+                    "`coordinate_space`; on the native route you see the image "
+                    "yourself — emit the array directly, applying any scale note "
+                    "in the result). Use for finding handwriting, marks, or "
+                    "layout elements to process programmatically."
+                )
             }
         },
         "required": ["image_url", "question"]
@@ -990,18 +1165,25 @@ def _configured_aux_model(sections: tuple, env_vars: tuple) -> Optional[str]:
 
 async def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> str:
     image_url, question, region = args.get("image_url", ""), args.get("question", ""), args.get("region")
+    boxes = bool(args.get("boxes"))
     task_id = kw.get("task_id")
     # No concurrency gate around the whole analysis — the CPU burst is bounded inside the
     # encode/resize step, so multi-image fan-out keeps full request concurrency.
     if _should_use_native_vision_fast_path():
         logger.info("vision_analyze: native fast path")
-        return await _vision_analyze_native(image_url, question, task_id=task_id, region=region)
+        return await _vision_analyze_native(
+            image_url, question, task_id=task_id, region=region, boxes=boxes)
+
+    model = _configured_aux_model(("vision",), ("AUXILIARY_VISION_MODEL",))
+    if boxes:
+        # Grounding mode sends the raw question; the locator wrapper is added at wire time.
+        return await vision_analyze_tool(
+            image_url, question, model, task_id=task_id, region=region, boxes=True)
 
     # Legacy path: aux LLM describes the image and we return its text.
     full_prompt = (
         "Fully describe and explain everything about this image, then answer the "
         f"following question:\n\n{question}")
-    model = _configured_aux_model(("vision",), ("AUXILIARY_VISION_MODEL",))
     return await vision_analyze_tool(image_url, full_prompt, model, task_id=task_id, region=region)
 
 

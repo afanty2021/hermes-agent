@@ -243,6 +243,47 @@ def _normalize_to_supported_image(
         f"conversion). Convert it to PNG or JPEG and try again.")
 
 
+def _bake_exif_orientation(image_path: Path, mime_type: Optional[str]) -> tuple[Path, Optional[str]]:
+    """Rewrite orientation-tagged images with the rotation baked into the pixels.
+
+    EXIF-rotated files are a two-plane trap: providers render the display plane
+    while raw pixel access (region crops, boxes-to-erase pipelines) sees the
+    stored one, so coordinates reported against one plane map onto the wrong
+    other. Baking the transpose here — once, before validation, cropping and
+    any downscale — makes the stored plane and the display plane the same file
+    for every consumer downstream. Untagged or upright files return unchanged
+    (no re-encode); on any failure the input passes through as-is.
+    """
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return image_path, mime_type
+    try:
+        with Image.open(image_path) as img:
+            orientation = img.getexif().get(274, 1)
+            if orientation in (None, 1):
+                return image_path, mime_type
+            transposed = ImageOps.exif_transpose(img)
+            out_dir = get_hermes_dir("cache/vision", "temp_vision_images")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            is_png = (mime_type or _determine_mime_type(image_path)) == "image/png"
+            if is_png:
+                out_path = out_dir / f"upright_{uuid.uuid4().hex[:12]}.png"
+                transposed.save(out_path, format="PNG")
+                out_mime = "image/png"
+            else:
+                if transposed.mode not in ("RGB", "L"):
+                    transposed = transposed.convert("RGB")
+                out_path = out_dir / f"upright_{uuid.uuid4().hex[:12]}.jpg"
+                transposed.save(out_path, format="JPEG", quality=90)
+                out_mime = "image/jpeg"
+        if _nonempty_file(out_path):
+            return out_path, out_mime
+    except Exception as exc:
+        logger.debug("EXIF orientation bake skipped for %s: %s", image_path, exc)
+    return image_path, mime_type
+
+
 # Full raster validation runs on untrusted images in a shared CPU executor: bound animated
 # work by frame count AND total decoded area so a compact file cannot monopolize a worker.
 _VISION_MAX_VALIDATED_FRAME_COUNT = 100
