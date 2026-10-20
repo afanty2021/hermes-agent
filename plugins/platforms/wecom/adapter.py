@@ -724,13 +724,19 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
     """Reuse the live gateway adapter in-process, else connect ephemerally (WeCom allows ONE
     WebSocket per bot — a second connection kicks the first). The live adapter is the ACTIVE
     PROFILE's (``_live_adapter``): a bare ``runner.adapters`` hit is the default profile's bot under
-    multiplex, so a secondary profile's send would leave with the wrong identity."""
+    multiplex, so a secondary profile's send would leave with the wrong identity.
+    Media files ride the adapter's native media APIs (chunked upload + send on that same
+    WebSocket) with the exact semantics of the in-gateway delivery path."""
     try:
         from tools.send_message_senders import _live_adapter
         _, adapter = _live_adapter(Platform.WECOM)
     except Exception:
         adapter = None
     if adapter is not None:
+        if media_files:
+            from tools.send_message_tool import _send_live_adapter_media
+            return await _send_live_adapter_media(
+                adapter, chat_id, message, media_files, thread_id=thread_id, force_document=force_document)
         return await _send_via(adapter, chat_id, message, live=True)
     if not check_wecom_requirements():
         return send_error("WeCom requirements not met. Need aiohttp + WECOM_BOT_ID/SECRET.")
@@ -739,6 +745,10 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
         if not await adapter.connect():
             return send_error(f"WeCom: failed to connect - {getattr(adapter, 'fatal_error_message', None) or 'unknown error'}")
         try:
+            if media_files:
+                from tools.send_message_tool import _send_live_adapter_media
+                return await _send_live_adapter_media(
+                    adapter, chat_id, message, media_files, thread_id=thread_id, force_document=force_document)
             return await _send_via(adapter, chat_id, message, live=False)
         finally:
             await adapter.disconnect()
