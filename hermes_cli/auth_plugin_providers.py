@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 # Providers handled outside the registry: copilot/kimi/zai have bespoke token refresh in auth.py;
 # openrouter/custom are aggregator/user-supplied and runtime_provider relies on
 # ``openrouter not in PROVIDER_REGISTRY``.
+# (fork: kimi-coding-cn rides this list. zai-coding-cn needs no entry — its profile registers
+# from the bundled layer, so the user-source override guard below never applies to it.)
 _REGISTRY_PLUGIN_SKIP = frozenset({"copilot", "kimi-coding", "kimi-coding-cn", "zai", "openrouter", "custom"})
 
 PLUGIN_AUTH_ACTIONS = ("add", "status", "logout", "refresh")

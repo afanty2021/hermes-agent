@@ -395,7 +395,7 @@ class TestAutoAppendWhitelistMembership:
 
     def test_listening_audio_wire_name_whitelisted(self):
         from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
-        from tools.mcp_tool import mcp_prefixed_tool_name
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
 
         assert (
             mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_listening_audio")
@@ -404,7 +404,7 @@ class TestAutoAppendWhitelistMembership:
 
     def test_mindmap_wire_name_whitelisted(self):
         from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
-        from tools.mcp_tool import mcp_prefixed_tool_name
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
 
         assert (
             mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_mindmap")
@@ -413,7 +413,7 @@ class TestAutoAppendWhitelistMembership:
 
     def test_worksheet_wire_name_whitelisted(self):
         from gateway.run import _AUTO_APPEND_MEDIA_TOOL_NAMES
-        from tools.mcp_tool import mcp_prefixed_tool_name
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
 
         assert (
             mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_worksheet")
@@ -431,7 +431,7 @@ class TestAutoAppendWhitelistMembership:
 
     def test_auto_append_collects_worksheet_media_on_real_dispatch_name(self):
         from gateway.run import _collect_auto_append_media_tags
-        from tools.mcp_tool import mcp_prefixed_tool_name
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
 
         messages = self._tool_round_messages(
             mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_worksheet"))
@@ -454,7 +454,7 @@ class TestAutoAppendWhitelistMembership:
 
     def test_auto_append_collects_mindmap_media_on_real_dispatch_name(self):
         from gateway.run import _collect_auto_append_media_tags
-        from tools.mcp_tool import mcp_prefixed_tool_name
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
 
         messages = self._tool_round_messages(
             mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_mindmap"))
@@ -463,7 +463,7 @@ class TestAutoAppendWhitelistMembership:
 
     def test_auto_append_collects_listening_media_on_real_dispatch_name(self):
         from gateway.run import _collect_auto_append_media_tags
-        from tools.mcp_tool import mcp_prefixed_tool_name
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
 
         messages = self._tool_round_messages(
             mcp_prefixed_tool_name("llm-wiki-training", "teacher_tutor_listening_audio"))

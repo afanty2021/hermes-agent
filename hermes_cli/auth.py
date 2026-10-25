@@ -191,7 +191,9 @@ _REGISTRY_ROWS: tuple[Any, ...] = (
     ("zai", "Z.AI / GLM", "https://api.z.ai/api/paas/v4",
      ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "GLM_BASE_URL"),
     # fork: China Coding Plan endpoint as its own provider (interactive dispatch catch-all,
-    # 2750d1b20f). Kept out of plugin auto-registration like zai via _REGISTRY_PLUGIN_SKIP.
+    # 2750d1b20f). Registry-skip handling lives in auth_plugin_providers._REGISTRY_PLUGIN_SKIP;
+    # this row needs no entry there — its profile is bundled-layer, so the user-source override
+    # guard (provider_source() == "user") never applies to it.
     ("zai-coding-cn", "Z.AI / GLM (China Coding Plan)", "https://open.bigmodel.cn/api/coding/paas/v4",
      ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "GLM_BASE_URL"),
     # Legacy platform.moonshot.ai keys use this endpoint (OpenAI-compat); sk-kimi- (Kimi Code)
@@ -254,11 +256,6 @@ PROVIDER_REGISTRY: dict[str, ProviderConfig] = {
 # The rows above, before any plugin touches the dict (a user plugin may override these; #48450).
 BUILTIN_PROVIDER_IDS = frozenset(PROVIDER_REGISTRY)
 
-# Providers handled outside the registry: copilot/kimi/zai have bespoke token refresh here;
-# openrouter/custom are aggregator/user-supplied and runtime_provider relies on
-# ``openrouter not in PROVIDER_REGISTRY``. (fork: kimi-coding-cn / zai-coding-cn are fork
-# provider profiles kept out of plugin auto-registration like their upstream siblings.)
-_REGISTRY_PLUGIN_SKIP = frozenset({"copilot", "kimi-coding", "kimi-coding-cn", "zai", "zai-coding-cn", "openrouter", "custom"})
 # ``hermes_cli.config`` discovers model-provider plugins while importing, and a plugin may read this
 # module's registry during that discovery. Keep the import below ProviderConfig / PROVIDER_REGISTRY so
 # a plugin never observes a partially initialized auth module (CONTRACT: during discovery a plugin may
