@@ -22,6 +22,7 @@ import/patch target): ``terminal_tool_config`` (TERMINAL_* reads, ``_quiet``),
 import json
 import logging
 import os
+import re
 import sys
 import time
 import threading
