@@ -270,9 +270,14 @@ class TestStreamingPerPlatform:
         turn produced zero feedback). Only wecom is flipped out of the LOW
         tier; its siblings keep the quiet defaults."""
         from gateway.display_config import resolve_display_setting
+        from gateway.platform_registry import platform_registry
         from hermes_cli.plugins import discover_plugins
 
         discover_plugins()
+        # Bundled platforms register as deferred loaders keyed by the manifest's
+        # PRIMARY name only; a secondary name (wecom_callback) resolves just via
+        # all_entries(), the same enumeration gateway/config_loader.py runs at boot.
+        platform_registry.all_entries()
         assert resolve_display_setting({}, "wecom", "long_running_notifications") is True
         assert resolve_display_setting({}, "wecom", "busy_ack_detail") is True
         assert resolve_display_setting({}, "signal", "long_running_notifications") is False
@@ -282,9 +287,11 @@ class TestStreamingPerPlatform:
     def test_wecom_callback_default_remains_off(self):
         """The legacy callback adapter has no stream protocol — keep off."""
         from gateway.display_config import resolve_display_setting
+        from gateway.platform_registry import platform_registry
         from hermes_cli.plugins import discover_plugins
 
         discover_plugins()
+        platform_registry.all_entries()  # wecom_callback is a deferred secondary name (see above)
         assert resolve_display_setting({}, "wecom_callback", "streaming") is False
 
     def test_wecom_user_can_still_disable_streaming(self):

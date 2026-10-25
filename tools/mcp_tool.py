@@ -572,25 +572,31 @@ def _is_application_level_mcp_error(exc: BaseException) -> bool:
     tests/test_mcp_circuit_breaker.py.)
     """
     try:
-        from mcp.shared.exceptions import McpError
-    except ImportError:  # pragma: no cover — very old SDK layouts
+        from mcp.shared.exceptions import McpError  # mcp 1.x name
+    except ImportError:
+        McpError = None
         try:
-            from mcp.types import McpError  # type: ignore[assignment]
+            from mcp.shared.exceptions import MCPError as McpError  # type: ignore[assignment]  # mcp 2.x rename
         except ImportError:
-            return False
+            try:
+                from mcp.types import McpError  # type: ignore[assignment]
+            except ImportError:  # pragma: no cover — very old SDK layouts
+                return False
     if not isinstance(exc, McpError):
         return False
-    code = getattr(getattr(exc, "error", None), "code", None)
+    code = getattr(exc, "code", None)  # mcp 2.x exposes .code directly
+    if not isinstance(code, int):
+        code = getattr(getattr(exc, "error", None), "code", None)
     if not isinstance(code, int):
         return False
-    # 408 is the one code the CLIENT can synthesize locally: with
-    # read_timeout_seconds configured, the SDK converts its own TimeoutError
-    # into McpError(ErrorData(code=408)) — no server response involved
-    # (mcp 1.26.0 shared/session.py). Counting it as "answered" would
-    # permanently disable the breaker for hung servers (a more common death
-    # than refused connections). Every other code arrives via a real
-    # JSON-RPC error response from the server.
-    return code != 408
+    # Codes the CLIENT can synthesize locally are NOT server answers. mcp 1.26
+    # converts its own read TimeoutError into ErrorData(code=408); mcp 2.x
+    # synthesizes REQUEST_TIMEOUT (-32001) and CONNECTION_CLOSED (-32000) in
+    # client/session.py. Counting any of these as "answered" would permanently
+    # disable the breaker for hung/dead servers (a more common death than
+    # refused connections). Every other code arrives via a real JSON-RPC error
+    # response from the server.
+    return code not in (408, -32001, -32000)
 
 
 # Session identity stamped onto every MCP tools/call request as ``_meta``

@@ -225,7 +225,10 @@ class TestAdvanceCompressionSession:
 
         assert result is not None
         assert result.updated_at == idle
-        assert store.suspend_recently_active(max_age_seconds=120) == 0
+        # (20261025 merge) the follow-up ``suspend_recently_active(max_age_seconds=120) == 0``
+        # consumer check was dropped: upstream replaced the restart-resume suspend machinery
+        # (gateway/session_lifecycle.py) wholesale; the clock-preservation invariant itself
+        # stays pinned by ``result.updated_at == idle`` above.
 
 
 

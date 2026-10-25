@@ -17,7 +17,10 @@ import asyncio
 
 import pytest
 
-from mcp.shared.exceptions import McpError
+try:  # mcp 1.x name; the 2.x SDK renamed it to MCPError (same ctor shape: code/message/data)
+    from mcp.shared.exceptions import McpError
+except ImportError:
+    from mcp.shared.exceptions import MCPError as McpError
 from mcp.types import CallToolResult, ErrorData, TextContent
 
 from tools import mcp_tool
@@ -60,7 +63,9 @@ def _install(monkeypatch, outcome):
     # module (mcp_tool_handlers calls _trust_gate_check in-module, discovery/loop via their
     # modules); breaker STATE still lives in tools.mcp_tool (handlers read it through _core).
     server = _FakeServer(outcome)
-    monkeypatch.setattr(mcp_tool_handlers, "_trust_gate_check", lambda s, t: None)
+    # trust-gate signature grew across upstream merges (now server, tool, booked, args) — the
+    # breaker pin only cares about the transport outcome, so accept any shape.
+    monkeypatch.setattr(mcp_tool_handlers, "_trust_gate_check", lambda *a, **k: None)
     monkeypatch.setattr(mcp_tool_discovery, "_get_connected_server_for_call", lambda s: server)
 
     def _run(coro_or_factory, timeout=None):
@@ -72,12 +77,21 @@ def _install(monkeypatch, outcome):
     return mcp_tool_handlers._make_tool_handler(SERVER, TOOL, 5.0)
 
 
-IDENTITY_REFUSAL = McpError(ErrorData(
-    code=-32602,
-    message='wecom_userid "Huangzhengbo" does not match session identity '
-            '"TuoMaSiXueXiGuanGuangGuLanGuangX": refusing call '
-            '(session identity is locked; no override, no retry)',
-))
+def _mcp_error(code: int, message: str):
+    """Build the SDK's error exception on either SDK line: mcp 1.x takes an
+    ErrorData, mcp 2.x takes (code, message, data=None) directly."""
+    try:
+        return McpError(ErrorData(code=code, message=message))
+    except TypeError:
+        return McpError(code=code, message=message)
+
+
+IDENTITY_REFUSAL = _mcp_error(
+    -32602,
+    'wecom_userid "Huangzhengbo" does not match session identity '
+    '"TuoMaSiXueXiGuanGuangX": refusing call '
+    '(session identity is locked; no override, no retry)',
+)
 
 
 def test_classifier_accepts_jsonrpc_error_response():
@@ -131,11 +145,11 @@ def test_transport_failures_still_trip_the_breaker(monkeypatch):
     assert "consecutive" in blocked
 
 
-SYNTHETIC_408 = McpError(ErrorData(
-    code=408,
-    message="Timed out while waiting for response to CallToolRequest. "
-            "Waited 30.0 seconds.",
-))
+SYNTHETIC_408 = _mcp_error(
+    408,
+    "Timed out while waiting for response to CallToolRequest. "
+    "Waited 30.0 seconds.",
+)
 
 
 def test_synthetic_timeout_408_still_bumps():
@@ -144,6 +158,17 @@ def test_synthetic_timeout_408_still_bumps():
     response involved. A hung server must keep burning strikes (and trip),
     exactly like a refused one."""
     assert not mcp_tool._is_application_level_mcp_error(SYNTHETIC_408)
+
+
+def test_mcp2x_synthesized_codes_still_bump():
+    """mcp 2.x renamed the class (MCPError) and synthesizes its transport
+    shapes with REQUEST_TIMEOUT (-32001) / CONNECTION_CLOSED (-32000) in
+    client/session.py — client-generated, never a server answer, so they must
+    keep burning strikes like 408 did on 1.x."""
+    assert not mcp_tool._is_application_level_mcp_error(_mcp_error(-32001, "read timeout"))
+    assert not mcp_tool._is_application_level_mcp_error(_mcp_error(-32000, "Connection closed"))
+    # ...while a real server JSON-RPC answer on the 2.x class still resets.
+    assert mcp_tool._is_application_level_mcp_error(_mcp_error(-32602, "invalid params"))
 
 
 def test_hung_server_via_408_trips_the_breaker(monkeypatch):
