@@ -12,7 +12,7 @@ readme = "README.md"
 # to get thru their update step on old python.
 # Shortly after they do, we update to our latest python.
 # See tests/compat/README.md for the updater contract this keeps.
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.15"
 authors = [{ name = "Nous Research" }]
 license = "MIT"
 license-files = ["LICENSE"]
