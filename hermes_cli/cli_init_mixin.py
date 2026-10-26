@@ -439,7 +439,8 @@ class CLIInitMixin:
             failure = describe_storage_failure(e)
             # zops fork patch (20261026): `except ... as e` unbinds e when the handler
             # exits; the closure below must not capture the handler-scoped name or a
-            # deferred render_name it NameErrors (upstream latent since 9bcbe7b5df9).
+            # deferred render_name it NameErrors (upstream latent since aaafa80577;
+            # 9bcbe7b5df9 only moved the line).
             err = e
             def _present_store_warning():
                 try:
