@@ -34,6 +34,27 @@ def _content_type_base(resp) -> str:
     return resp.headers.get("content-type", "").split(";")[0].strip().lower()
 
 
+_SSE_EVENT_SIZE_PARAM: Optional[bool] = None
+
+
+def _sdk_accepts_max_sse_event_size() -> bool:
+    """True when the installed mcp SDK's ``streamable_http_client`` takes ``max_sse_event_size``.
+
+    The parameter arrived in mcp 2.3; the fork pins 2.0.0, where passing it is a TypeError at
+    the connect layer (latent since the v0.22.5 merge, review 2026-11-04 I-1). Probed once per
+    process; callers degrade to the SDK's 1 MiB EventSource default instead of dying.
+    """
+    global _SSE_EVENT_SIZE_PARAM
+    if _SSE_EVENT_SIZE_PARAM is None:
+        try:
+            import inspect
+            _SSE_EVENT_SIZE_PARAM = "max_sse_event_size" in inspect.signature(
+                _core.streamable_http_client).parameters
+        except (AttributeError, TypeError, ValueError):  # symbol absent / not introspectable
+            _SSE_EVENT_SIZE_PARAM = False
+    return _SSE_EVENT_SIZE_PARAM
+
+
 def _is_2xx(resp) -> bool:
     return 200 <= resp.status_code < 300
 
@@ -591,10 +612,18 @@ class MCPServerTransportMixin:
             async with _build_client(**client_kwargs) as http_client:
                 # Without max_sse_event_size the SDK parses each event against httpx2's 1 MiB default,
                 # a tighter second cap under our wire cap: a large tools/list or tool result (an
-                # editor screenshot) failed outright.
-                async with _core.streamable_http_client(url, http_client=http_client,
-                                                        max_sse_event_size=_MCP_HTTP_MAX_BODY_BYTES) as streams:
-                    yield streams
+                # editor screenshot) failed outright. The parameter needs mcp 2.3+; on the pinned
+                # 2.0.0 it's a TypeError at the connect layer, so probe before passing (fork patch
+                # 20261104, review I-1) and accept the 1 MiB default there.
+                if _sdk_accepts_max_sse_event_size():
+                    async with _core.streamable_http_client(url, http_client=http_client,
+                                                            max_sse_event_size=_MCP_HTTP_MAX_BODY_BYTES) as streams:
+                        yield streams
+                else:
+                    logger.warning("mcp SDK lacks streamable_http_client(max_sse_event_size=...); "
+                                   "SSE events capped at the SDK's 1 MiB default")
+                    async with _core.streamable_http_client(url, http_client=http_client) as streams:
+                        yield streams
         return _owned_client_streams()
 
     async def _run_http(self, config: dict):
