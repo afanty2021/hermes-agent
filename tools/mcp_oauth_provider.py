@@ -11,11 +11,25 @@ from __future__ import annotations
 import logging
 import re
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import urlparse, urlsplit
 
 if TYPE_CHECKING:
     from tools.mcp_oauth import HermesTokenStorage
 logger = logging.getLogger(__name__)
+
+try:  # fork (20261108 merge): upstream 1dadda835d imports this; the pinned mcp 2.0.0 predates
+    from mcp.client.auth.utils import issuers_match  # it. Fall back to the SDK's verbatim rule
+except ImportError:  # so the PRM trailing-slash acceptance works on the pin (SDK upgrade = no-op).
+
+    def issuers_match(a: str, b: str) -> bool:
+        """Simple string comparison of two issuer identifiers (RFC 8414 section 3.3), except that a root
+        issuer with and without its trailing slash (`scheme://authority` and `scheme://authority/`) name
+        the same server."""  # verbatim from mcp.client.auth.utils (newer SDK); do not "simplify" to rstrip
+        if a == b:
+            return True
+        shorter, longer = sorted((a, b), key=len)
+        parsed = urlparse(shorter)
+        return longer == f"{shorter}/" and shorter == f"{parsed.scheme}://{parsed.netloc}"
 
 # Authorization servers that advertise ``authorization_response_iss_parameter_supported`` and then
 # omit ``iss`` from the redirect (#111135). Exact issuer match, nothing else is relaxed.
@@ -185,7 +199,6 @@ class HermesProviderMixin:
             metadata = OAuthMetadata.model_validate_json(await response.aread())
         except ValidationError:
             return response
-        from mcp.client.auth.utils import issuers_match
         advertised, issuer = self.context.auth_server_url, str(metadata.issuer)
         if metadata_issued_by_origin(metadata, advertised, response):
             relation = "is the origin of"
