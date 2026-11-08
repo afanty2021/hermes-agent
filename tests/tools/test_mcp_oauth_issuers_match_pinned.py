@@ -21,8 +21,12 @@ from tools.mcp_oauth_provider import issuers_match  # noqa: E402
     # root issuer with/without trailing slash — the Otter.ai #132233 case
     ("https://otter.ai", "https://otter.ai/", True),
     ("https://otter.ai/", "https://otter.ai", True),
-    # a path-bearing issuer is NOT its slashless root — blanket rstrip would wrongly equate these
+    # anti-rstrip: a path-bearing issuer keeps its trailing slash distinct — blanket rstrip would
+    # wrongly equate this pair (the ONLY rstrip flip among the 8; 20261108 review correction: the
+    # earlier "two anti-rstrip cases" claim was wrong)
     ("https://as.example/mcp-issuer", "https://as.example/mcp-issuer/", False),
+    # anti-root-folding: a bare root is NOT its path-bearing child — rstrip already keeps these
+    # distinct; this case defeats origin-equality simplifications (scheme://netloc prefix matching)
     ("https://www.strava.com", "https://www.strava.com/mcp-issuer", False),
     # different authorities never match
     ("https://as.example", "https://other.example", False),

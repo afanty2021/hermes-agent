@@ -1,6 +1,6 @@
 # Hermes Agent - AI 上下文文档
 
-> 更新时间：2026-05-09 | 当前版本：v2026.5.9 | 上游版本：v0.13.0+ (2026.05.08, 87 commits) | 本地修改：zai-coding-cn provider, 自适应空闲超时
+> 更新时间：2026-11-08 | 当前版本：v2026.11.8 | 上游版本：v0.23.0+616 (2026.11.08, merge 21ae0e1238) | 本地修改：zai-coding-cn provider, 自适应空闲超时, wecom 平台适配, SDK 钉版 (mcp 2.0.0 / anthropic 0.87.0 / openai 2.24.0)
 
 ## 项目愿景
 
@@ -9,7 +9,7 @@ Hermes Agent 是一个**自我改进的 AI 代理**，由 [Nous Research](https:
 核心特性：
 - **全新 Ink-based TUI**：完整的 React/Ink 重写的交互式 CLI（`hermes --tui`），支持粘性编辑器、OSC-52 剪贴板、稳定选择器键、状态栏计时器、子代理可观察性覆盖层
 - **Web UI Dashboard**：基于浏览器的管理界面，支持配置管理、会话监控、技能管理、环境变量配置、日志查看、插件系统和实时主题切换
-- **多平台集成**：Telegram、Discord、Slack、WhatsApp、Signal、QQBot、CLI —— 单一网关进程支持所有平台（17 个平台）
+- **多平台集成**：Telegram、Discord、Slack、WhatsApp、Signal、QQBot、CLI —— 单一网关进程支持所有平台（26 个平台，`plugins/platforms/`）
 - **传输层架构**：可插拔的传输层（`agent/transports/`），支持 Anthropic、ChatCompletions、ResponsesApi、Bedrock 等多种传输方式
 - **原生 AWS Bedrock**：通过 Converse API 原生支持 AWS Bedrock
 - **封闭学习循环**：代理策展记忆、定期推送、自主技能创建、技能自我改进、FTS5 会话搜索
