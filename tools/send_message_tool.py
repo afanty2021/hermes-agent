@@ -103,11 +103,8 @@ def _authorize_relay_target(platform_name: str, chat_id, thread_id=None, *,
         # an unattributable FAULT — never proof that there is no relay here.
         # I previously admitted the nameless case to protect the CLI/cron path;
         # that reasoning was wrong, because that path does not produce one.
-        _missing = getattr(exc, "name", None)
-        if not isinstance(exc, ModuleNotFoundError) or _missing not in (
-            "gateway",
-            "gateway.relay",
-            "gateway.relay.egress",
+        if not isinstance(exc, ModuleNotFoundError) or (
+            exc.name != "gateway.relay.egress" and not "gateway.relay.egress".startswith(f"{exc.name}.")
         ):
             logger.exception(
                 "relay egress module failed to import for %s — refusing the send",
@@ -688,7 +685,8 @@ _CHUNKED_ROUTES = {
 
 # Upstream removed the _TEXT_SENDERS table (policy/text_direct + platform_registry now route
 # generic text); fork's "wecom" standalone-media delivery lives in the adapter + _CHUNKED_ROUTES.
-_MEDIA_PLATFORMS_NOTE = "telegram, discord, matrix, weixin, signal, yuanbao, wecom, feishu, whatsapp, slack and qqbot"
+# 20261108 merge: upstream e1f7b59ec2 moved yuanbao out of core (Labs plugin) — drop yuanbao, keep wecom.
+_MEDIA_PLATFORMS_NOTE = "telegram, discord, matrix, weixin, signal, wecom, feishu, whatsapp, slack and qqbot"
 
 
 async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None,
