@@ -782,7 +782,13 @@ markers = [
   "platforms(*specs, arch=None, arch_negate=False): run only on hosts matching at least one spec — linux/macos/windows/posix/any, 'not X' negation, optional arch filter",
 ]
 # integration tests take way too long to run in the normal CI environments
-addopts = "-m 'not integration and not live'"
+# fork deselect (2026-11-24): upstream #11113 asserts that tool-error payloads burn
+# circuit-breaker strikes. This fork deliberately resets on any completed RPC instead
+# (tools/mcp_tool_handlers.py `_on_failure` / `_record_call_outcome`; pinned by
+# tests/test_mcp_circuit_breaker.py), so that upstream case is a permanent
+# design-divergence red here — not a regression, do not "fix" the fork to satisfy it.
+# Keyed by node id: if upstream renames or drops the case, this entry is a silent no-op.
+addopts = "-m 'not integration and not live' --deselect tests/tools/test_mcp_circuit_breaker.py::test_breaker_opened_by_tool_errors_says_rejected_not_unreachable"
 
 [tool.ty.environment]
 python-version = "3.13"
